@@ -60,10 +60,19 @@ class WatchdogProcess(ServiceProcess):
                 settings.solana.rpc_http_url,
                 timeout_seconds=settings.timeouts.rpc_seconds,
                 latency_max_ms=wd.rpc_latency_max_ms,
+                http=self._container.http,
             ),
-            HttpProbe("api", wd.api_health_url, timeout_seconds=settings.timeouts.http_seconds),
             HttpProbe(
-                "dashboard", wd.dashboard_url, timeout_seconds=settings.timeouts.http_seconds
+                "api",
+                wd.api_health_url,
+                timeout_seconds=settings.timeouts.http_seconds,
+                http=self._container.http,
+            ),
+            HttpProbe(
+                "dashboard",
+                wd.dashboard_url,
+                timeout_seconds=settings.timeouts.http_seconds,
+                http=self._container.http,
             ),
             ClickHouseProbe(self._container.clickhouse),
             resource_probe,

@@ -86,11 +86,20 @@ def build_probes(container: Container) -> list[HealthProbe]:
             s.solana.rpc_http_url,
             timeout_seconds=s.timeouts.rpc_seconds,
             latency_max_ms=s.watchdog.rpc_latency_max_ms,
+            http=container.http,
         )
     )
     http_timeout = s.timeouts.http_seconds
-    probes.append(HttpProbe("api", s.watchdog.api_health_url, timeout_seconds=http_timeout))
-    probes.append(HttpProbe("dashboard", s.watchdog.dashboard_url, timeout_seconds=http_timeout))
+    probes.append(
+        HttpProbe(
+            "api", s.watchdog.api_health_url, timeout_seconds=http_timeout, http=container.http
+        )
+    )
+    probes.append(
+        HttpProbe(
+            "dashboard", s.watchdog.dashboard_url, timeout_seconds=http_timeout, http=container.http
+        )
+    )
     probes.append(ClickHouseProbe(container.clickhouse))
     return probes
 

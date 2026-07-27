@@ -134,6 +134,7 @@ from hades.shared_kernel.events import (
     RedisEventBus,
 )
 from hades.shared_kernel.events.store import EventStore
+from hades.shared_kernel.http import HttpClientProvider
 from hades.shared_kernel.logging import configure_logging, get_logger
 from hades.shared_kernel.observability import MetricsRegistry, get_metrics_registry
 from hades.shared_kernel.persistence import Database
@@ -154,12 +155,17 @@ class Container:
     redis: RedisProvider
     clickhouse: ClickHouseProvider
     notification: NotificationPublisher
+    #: Shared outbound HTTP client. Callers such as the health probes are rebuilt
+    #: per request, so the connection pool has to outlive them or every check
+    #: pays a fresh TLS handshake and reports it as the dependency's latency.
+    http: HttpClientProvider = field(default_factory=HttpClientProvider)
     database: Database | None = field(default=None)
 
     async def shutdown(self) -> None:
         if self.database is not None:
             await self.database.dispose()
         await self.redis.close()
+        await self.http.close()
         self.clickhouse.close()
 
 
@@ -330,6 +336,7 @@ def build_container(settings: Settings | None = None, *, role: str = "app") -> C
         redis=redis,
         clickhouse=clickhouse,
         notification=notification,
+        http=HttpClientProvider(timeout_seconds=settings.timeouts.http_seconds),
         database=database,
     )
 
