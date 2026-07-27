@@ -367,6 +367,100 @@ export interface DriftAlert {
   at: string | null;
 }
 
+// --- Research Lab ------------------------------------------------------------
+// The lab only ever *proposes*. Nothing on these screens deploys anything, and
+// a promotion is a recorded governance decision, never an activation.
+
+export interface ResearchStatus {
+  lab_enabled: boolean;
+  running: boolean;
+  experiments_total: number;
+  backtests_total: number;
+  candidates_total: number;
+  promotions_total: number;
+  knowledge_total: number;
+  live: {
+    shadow_strategies?: ShadowStrategy[];
+    [key: string]: unknown;
+  };
+}
+
+export interface ShadowStrategy {
+  name?: string;
+  expectancy?: number;
+  trades?: number;
+  win_rate?: number;
+  [key: string]: unknown;
+}
+
+export interface ResearchExperiment {
+  experiment_id: string;
+  name: string;
+  kind: string;
+  status: string;
+  hypothesis: string | null;
+  conclusion: string | null;
+  metrics: Record<string, unknown> | null;
+  at: string | null;
+}
+
+export interface ResearchBacktest {
+  backtest_id: string;
+  strategy: string;
+  total_return: number | null;
+  sharpe: number | null;
+  max_drawdown: number | null;
+  profit_factor: number | null;
+  trades: number | null;
+  at: string | null;
+}
+
+export interface ResearchCandidate {
+  candidate_id: string;
+  name: string;
+  archetype: string | null;
+  version: string | null;
+  stage: string;
+  payload: Record<string, unknown> | null;
+}
+
+export interface ResearchPromotion {
+  candidate_id: string;
+  candidate_name: string | null;
+  kind: string | null;
+  outcome: string;
+  manual_approved: boolean;
+  rationale: string | null;
+  at: string | null;
+}
+
+export interface ResearchKnowledgeEntry {
+  entry_id: string;
+  category: string;
+  title: string;
+  body: string | null;
+  data: Record<string, unknown> | null;
+  at: string | null;
+}
+
+export interface ResearchHypothesis {
+  hypothesis_id: string;
+  statement: string;
+  status: string;
+  rationale: string | null;
+  evidence: Record<string, unknown> | null;
+  at: string | null;
+}
+
+export interface ResearchReport {
+  report_id: string;
+  period: string | null;
+  title: string;
+  summary: string | null;
+  payload: Record<string, unknown> | null;
+  at: string | null;
+}
+
 async function get<T>(path: string): Promise<T> {
   const res = await fetch(`${BASE_URL}${path}`);
   if (!res.ok) throw new Error(`${path} -> ${res.status}`);
@@ -452,5 +546,31 @@ export const api = {
   promoteModel: (modelId: string) =>
     post<{ promoted: boolean; model_id: string; name: string; version: string; status: string }>(
       `/api/v1/committee/models/${modelId}/promote`,
+    ),
+  // Research Lab — read-only except the human-gated promotion record.
+  researchStatus: () => get<ResearchStatus>("/api/v1/research/status"),
+  researchExperiments: (limit = 50) =>
+    get<{ experiments: ResearchExperiment[] }>(`/api/v1/research/experiments?limit=${limit}`),
+  researchBacktests: (limit = 50) =>
+    get<{ backtests: ResearchBacktest[] }>(`/api/v1/research/backtests?limit=${limit}`),
+  researchCandidates: () =>
+    get<{ candidates: ResearchCandidate[] }>("/api/v1/research/candidates"),
+  researchShadows: () =>
+    get<{ shadows: ShadowStrategy[]; source: string }>("/api/v1/research/shadows"),
+  researchRankings: () =>
+    get<{ ranking: string[]; entries: ShadowStrategy[] }>("/api/v1/research/rankings"),
+  researchPromotions: (limit = 50) =>
+    get<{ promotions: ResearchPromotion[] }>(`/api/v1/research/promotions?limit=${limit}`),
+  researchKnowledge: (limit = 100) =>
+    get<{ entries: ResearchKnowledgeEntry[] }>(`/api/v1/research/knowledge?limit=${limit}`),
+  researchHypotheses: (limit = 100) =>
+    get<{ hypotheses: ResearchHypothesis[] }>(`/api/v1/research/hypotheses?limit=${limit}`),
+  researchReports: (limit = 50) =>
+    get<{ reports: ResearchReport[] }>(`/api/v1/research/reports?limit=${limit}`),
+  // Fail-closed: the API rejects this without an explicit approve=true. It
+  // records a decision and returns a note saying nothing was activated.
+  promoteCandidate: (candidateId: string) =>
+    post<{ candidate_id: string; name: string; recorded: boolean; note: string }>(
+      `/api/v1/research/candidates/${candidateId}/promote?approve=true`,
     ),
 };
