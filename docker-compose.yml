@@ -57,11 +57,25 @@ x-app-base: &app-base
       max-size: "10m"
       max-file: "5"
 
+# Health-check budget for the Python services.
+#
+# Each probe runs `python -m hades.ops.healthcheck`, which starts an interpreter
+# and imports the application package — pydantic, sqlalchemy, fastapi and several
+# hundred modules. That is inherently slow, and on a small host it is *much*
+# slower than it looks: on a 2-vCPU LXC a bare `python -c "print(1)"` measured
+# 4.4s, and the full probe 77s under build load. With the previous 10s timeout
+# every service sat permanently `unhealthy` with a failing streak in the
+# thousands while the processes themselves were fine — a false alarm that hides
+# real failures and can drive the watchdog into pointless recovery.
+#
+# The budget below is sized for the slow case rather than the ideal one. The
+# interval is deliberately long too: each probe costs a whole interpreter start,
+# so probing often is itself a load problem on a small box.
 x-healthcheck-defaults: &healthcheck-defaults
-  interval: 30s
-  timeout: 10s
-  retries: 5
-  start_period: 30s
+  interval: 60s
+  timeout: 45s
+  retries: 3
+  start_period: 120s
 
 services:
   # ---------------------------------------------------------------------------
