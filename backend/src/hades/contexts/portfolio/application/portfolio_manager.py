@@ -1,7 +1,7 @@
 """Portfolio Manager - the live book of record and the risk read model.
 
 Maintains the full portfolio state in real time - balance, equity, cash,
-invested capital, realised and unrealised PnL, fees, drawdown, ROI and exposure -
+invested capital, realised and unrealised PnL, drawdown, ROI and exposure -
 by reacting to the Position event stream (``PositionOpened`` / ``PositionUpdated``
 / ``PositionClosed``). It is the single source of truth every dashboard and the
 Risk Manager read from.
@@ -74,8 +74,6 @@ class PortfolioManager:
 
         self._cash = starting_balance_usd
         self._realized = 0.0
-        self._fees = 0.0
-        self._slippage = 0.0
         self._peak = starting_balance_usd
         self._positions: dict[str, OpenPositionView] = {}
         self._closed: list[ClosedTrade] = []
@@ -162,8 +160,6 @@ class PortfolioManager:
             invested_usd=round(invested, 6),
             realized_pnl_usd=round(self._realized, 6),
             unrealized_pnl_usd=round(unrealized, 6),
-            fees_usd=round(self._fees, 6),
-            slippage_usd=round(self._slippage, 6),
             peak_equity_usd=round(self._peak, 6),
             open_positions=len(self._positions),
         )
@@ -251,8 +247,6 @@ class PortfolioManager:
             starting_balance_usd=self._start,
             cash_usd=self._cash,
             realized_pnl_usd=self._realized,
-            fees_usd=self._fees,
-            slippage_usd=self._slippage,
             peak_equity_usd=self._peak,
             positions={
                 key: PersistedPosition(
@@ -283,8 +277,6 @@ class PortfolioManager:
         """
         self._cash = state.cash_usd
         self._realized = state.realized_pnl_usd
-        self._fees = state.fees_usd
-        self._slippage = state.slippage_usd
         self._peak = max(state.peak_equity_usd, self._start)
         self._positions = {
             key: OpenPositionView(

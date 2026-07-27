@@ -13,7 +13,7 @@ from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
 
-from pydantic import Field
+from pydantic import ConfigDict, Field
 
 from hades.contexts.common.domain.value_objects import Money, TokenRef
 from hades.contexts.portfolio.domain.events import (
@@ -152,13 +152,19 @@ class PersistedPortfolio(ValueObject):
     Only *state* lives here, never derived figures: equity, exposure, ROI and
     drawdown are recomputed from these on load, so a stale formula can never be
     resurrected from storage.
+
+    Frictions (fees, slippage) are deliberately absent: the execution context
+    already owns them (``TransactionManager`` stats), and the realised PnL
+    carried on ``PositionClosed`` is already net of both round-trip fees, so a
+    second tally here could only duplicate or contradict them. ``extra`` is
+    relaxed to ``ignore`` so rows written before they were dropped still load.
     """
+
+    model_config = ConfigDict(frozen=True, extra="ignore")
 
     starting_balance_usd: float
     cash_usd: float
     realized_pnl_usd: float = 0.0
-    fees_usd: float = 0.0
-    slippage_usd: float = 0.0
     peak_equity_usd: float = 0.0
     #: position_id -> the open position.
     positions: dict[str, PersistedPosition] = Field(default_factory=dict)
@@ -184,8 +190,6 @@ class PortfolioState(ValueObject):
     invested_usd: float
     realized_pnl_usd: float = 0.0
     unrealized_pnl_usd: float = 0.0
-    fees_usd: float = 0.0
-    slippage_usd: float = 0.0
     peak_equity_usd: float = 0.0
     open_positions: int = 0
 

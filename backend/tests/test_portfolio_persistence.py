@@ -12,6 +12,7 @@ from decimal import Decimal
 from hades.contexts.common.domain.value_objects import Money, TokenMint, TokenRef
 from hades.contexts.portfolio.application.portfolio_manager import PortfolioManager
 from hades.contexts.portfolio.domain.events import PositionClosed, PositionOpened
+from hades.contexts.portfolio.domain.models import PersistedPortfolio
 from hades.contexts.portfolio.domain.ports import PortfolioStateStore
 from hades.contexts.portfolio.infrastructure.stores import InMemoryPortfolioStateStore
 from hades.shared_kernel.domain.identifiers import new_id
@@ -181,3 +182,29 @@ async def test_a_failing_store_never_blocks_the_manager() -> None:
     await _open(bus, new_id(), 100.0)
 
     assert manager.state().cash_usd == 900.0  # live state is unaffected
+
+
+async def test_a_legacy_snapshot_carrying_friction_fields_still_loads() -> None:
+    """``fees_usd`` / ``slippage_usd`` were dropped from the persisted book.
+
+    They were never incremented — only ever read back — while the realised PnL
+    on ``PositionClosed`` is already net of both round-trip fees, so the fields
+    could only ever report zero frictions. Rows written before the removal must
+    still rehydrate rather than fail validation.
+    """
+    store = InMemoryPortfolioStateStore()
+    _, bus = _manager(store)
+    await _open(bus, new_id(), 250.0)
+    saved = await store.load(mode="paper")
+    assert saved is not None
+
+    legacy = saved.model_dump(mode="json")
+    legacy["fees_usd"] = 12.5
+    legacy["slippage_usd"] = 3.25
+
+    restored, _ = _manager(InMemoryPortfolioStateStore())
+    restored.restore(PersistedPortfolio.model_validate(legacy))
+
+    assert restored.state().cash_usd == 750.0
+    assert not hasattr(restored.state(), "fees_usd")
+    assert not hasattr(restored.state(), "slippage_usd")
