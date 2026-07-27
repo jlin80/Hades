@@ -16,6 +16,7 @@ structlog is routed through the stdlib logging machinery so third-party loggers
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import sys
 from collections.abc import Mapping
@@ -61,11 +62,37 @@ class _DomainFilter(logging.Filter):
         return _domain_for(record.name) == self._domain
 
 
+#: Optional cross-process shipper. Set by a process that wants its lines visible
+#: in the dashboard's terminal; ``None`` (the default, and every unit test) keeps
+#: logging purely local.
+_shipper: Any | None = None
+
+
+def set_log_shipper(shipper: Any | None) -> None:
+    """Install (or clear) the shipper the ring-buffer processor also feeds.
+
+    ``shipper`` needs only a ``submit(record)`` method that never blocks or
+    raises — see :mod:`hades.shared_kernel.logging.shipper`.
+    """
+    global _shipper
+    _shipper = shipper
+
+
 def _ring_buffer_processor(
     _logger: Any, _method: str, event_dict: Mapping[str, Any]
 ) -> Mapping[str, Any]:
-    """structlog processor: mirror each record into the terminal ring buffer."""
-    get_log_buffer().append(dict(event_dict))
+    """structlog processor: mirror each record into the terminal ring buffer.
+
+    Also hands the record to the cross-process shipper when one is installed, so
+    the dashboard can show the Worker's pipeline and not just the API's own lines.
+    Shipping failures are swallowed here as a last resort: a logging processor
+    that raises would break the very call site it was only meant to observe.
+    """
+    record = dict(event_dict)
+    get_log_buffer().append(record)
+    if _shipper is not None:
+        with contextlib.suppress(Exception):
+            _shipper.submit(record)
     return event_dict
 
 

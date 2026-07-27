@@ -125,10 +125,35 @@ class RecoveryOrchestrator:
         )
 
     async def recover(self, component: str, detail: str = "") -> bool:
-        """Attempt to recover ``component``. Escalate to Emergency on exhaustion."""
+        """Attempt to recover ``component``. Escalate to Emergency on exhaustion.
+
+        Escalation requires attempts to have been *made and failed*. Two cases
+        that are not that, and must not escalate:
+
+        * **No action handles this component.** This process cannot reach it —
+          ``api``, ``dashboard``, ``resources`` and ``rpc`` have no action wired in
+          the Watchdog, which can only reconnect its own Redis/Postgres and reload
+          config. Counting "there was nothing to try" as a failed attempt drove the
+          counter up every cycle and, after three cycles, tripped Emergency Mode
+          over a component the Watchdog was never able to heal — halting risk-taking
+          for a reason no recovery could ever clear. The component being down is
+          still alerted on by the health monitor; that path is unchanged.
+        * **Already exhausted.** Emergency Mode is idempotent, but re-running the
+          actions and re-logging a WARNING on every cycle produced counters like
+          ``attempt=49 max_attempts=3``, which reads as nonsense to an operator and
+          buries real events. Once exhausted we stay quiet until :meth:`reset`.
+        """
+        actions = [a for a in self._actions if a.handles(component)]
+        if not actions:
+            _logger.debug("component_no_recovery_action", component=component)
+            return False
+
+        if self._attempts.get(component, 0) >= self._max_attempts:
+            _logger.debug("component_recovery_exhausted", component=component)
+            return False
+
         self._attempts[component] = self._attempts.get(component, 0) + 1
         attempt_no = self._attempts[component]
-        actions = [a for a in self._actions if a.handles(component)]
 
         for action in actions:
             ok = await self._run(action)

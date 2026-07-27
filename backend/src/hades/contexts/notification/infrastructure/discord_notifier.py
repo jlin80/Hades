@@ -47,9 +47,15 @@ class DiscordNotifier(Notifier):
     def channel(self) -> str:
         return "discord"
 
+    #: Topic tags that belong in the dedicated trades channel. Both spellings are
+    #: accepted: every emitter tags ``"trades"``, but this router only ever matched
+    #: ``"trade"``, so a configured trades webhook silently received nothing and
+    #: fills fell back to the main channel.
+    _TRADE_TOPICS = frozenset({"trade", "trades"})
+
     def _route(self, notification: Notification) -> str:
         topic = notification.tags.get("topic", "")
-        if topic == "trade":
+        if topic in self._TRADE_TOPICS:
             return self._trades_webhook_url
         if notification.severity in (Severity.WARNING, Severity.CRITICAL):
             return self._alerts_webhook_url

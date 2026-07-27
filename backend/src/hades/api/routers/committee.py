@@ -19,6 +19,7 @@ from sqlalchemy import desc, func, select
 
 from hades.api.dependencies import get_container
 from hades.bootstrap import Container
+from hades.contexts.learning.application.candidate_import import CandidateImportService
 from hades.contexts.learning.application.metrics import LearningMetrics
 from hades.contexts.learning.application.registry import ModelRegistryService
 from hades.contexts.learning.infrastructure.model_registry import PostgresModelRegistry
@@ -178,6 +179,38 @@ async def promote_model(
         "name": promoted.name,
         "version": promoted.version,
         "status": promoted.status.value,
+    }
+
+
+@router.post(
+    "/candidates/import",
+    summary="Import Research Lab candidate bundles from the inbox (never promotes)",
+)
+async def import_candidates(container: Container = Depends(get_container)) -> dict[str, Any]:
+    """Sweep the configured inbox and register valid candidates as TRAINED.
+
+    This is the Core's only ingestion path for the external Research Lab. It is a
+    *pull*: the lab writes bundles to disk, an operator places them in the inbox,
+    and this endpoint reads them. It registers candidates and nothing more —
+    promotion stays the separate, explicit, human-gated action it already was.
+    """
+    if container.database is None:
+        raise HTTPException(status_code=503, detail="database unavailable")
+    registry = PostgresModelRegistry(container.database)
+    service = CandidateImportService(
+        registry,
+        ModelRegistryService(registry, container.event_bus, LearningMetrics(container.metrics)),
+        container.settings.research.candidate_inbox,
+    )
+    report = await service.import_all()
+    return {
+        "inbox": container.settings.research.candidate_inbox,
+        "accepted": [
+            {"model_id": o.model_id, "name": o.name, "version": o.version, "path": o.path}
+            for o in report.accepted
+        ],
+        "rejected": [{"path": o.path, "reason": o.reason} for o in report.rejected],
+        "promoted": False,
     }
 
 

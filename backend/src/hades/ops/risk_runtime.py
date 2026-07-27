@@ -24,10 +24,12 @@ from hades.bootstrap import Container
 from hades.contexts.portfolio.application.metrics import PortfolioMetrics
 from hades.contexts.portfolio.application.portfolio_manager import PortfolioManager
 from hades.contexts.portfolio.domain.events import PositionClosed
-from hades.contexts.portfolio.domain.ports import PortfolioHistoryStore
+from hades.contexts.portfolio.domain.ports import PortfolioHistoryStore, PortfolioStateStore
 from hades.contexts.portfolio.infrastructure.stores import (
     InMemoryPortfolioHistoryStore,
+    InMemoryPortfolioStateStore,
     PostgresPortfolioHistoryStore,
+    PostgresPortfolioStateStore,
 )
 from hades.contexts.risk.application.factory import build_risk_manager, risk_config_from_settings
 from hades.contexts.risk.application.manager import RiskManager
@@ -44,6 +46,7 @@ from hades.contexts.risk.domain.events import (
 from hades.contexts.risk.domain.models import CircuitBreakerReason
 from hades.contexts.risk.domain.ports import RiskAuditStore, RiskStateStore
 from hades.contexts.risk.infrastructure.context_builder import RiskContextBuilder
+from hades.contexts.risk.infrastructure.facts_cache import EventDrivenRiskFacts
 from hades.contexts.risk.infrastructure.stores import (
     InMemoryRiskAuditStore,
     InMemoryRiskStateStore,
@@ -78,6 +81,7 @@ class RiskRuntime:
         self._history: PortfolioHistoryStore = self._build_history()
         self._audit: RiskAuditStore = self._build_audit()
         self._state_store: RiskStateStore = self._build_state_store()
+        self._portfolio_store: PortfolioStateStore = self._build_portfolio_store()
 
         self._portfolio = PortfolioManager(
             starting_balance_usd=container.settings.paper.starting_balance_usd,
@@ -85,6 +89,7 @@ class RiskRuntime:
             mode=container.settings.trading_mode.value,
             event_bus=container.event_bus,
             history=self._history,
+            state_store=self._portfolio_store,
         )
         self._manager: RiskManager = build_risk_manager(
             risk_config_from_settings(container.settings),
@@ -94,7 +99,11 @@ class RiskRuntime:
             notifier=container.notification,
             metrics=self._risk_metrics,
         )
-        self._builder = RiskContextBuilder()
+        # Without a facts port the builder joins nothing, and the Risk Manager
+        # ends up judging a token on the committee's own probabilities — which
+        # is how a security-rejected token used to arrive looking approved.
+        self._facts = EventDrivenRiskFacts()
+        self._builder = RiskContextBuilder(self._facts)
         self._register()
 
     # -- construction ---------------------------------------------------------
@@ -114,7 +123,16 @@ class RiskRuntime:
             return PostgresRiskStateStore(self._c.database)
         return InMemoryRiskStateStore()
 
+    def _build_portfolio_store(self) -> PortfolioStateStore:
+        if self._c.database is not None:
+            return PostgresPortfolioStateStore(self._c.database)
+        return InMemoryPortfolioStateStore()
+
     def _register(self) -> None:
+        # Subscribe the facts cache first: it must have recorded a token's
+        # security/wallet verdict before the committee prediction for that same
+        # token arrives and the Risk Manager asks for it.
+        self._facts.register(self._c.event_bus)
         self._portfolio.register(self._c.event_bus)
         RiskHandler(self._manager, self._builder, self._portfolio).register(self._c.event_bus)
         # Feed closed-trade outcomes to the Kill Switch (win resets the streak).
@@ -167,8 +185,26 @@ class RiskRuntime:
                 emergency=control.emergency_mode,
             )
 
+    async def _restore_portfolio(self) -> None:
+        try:
+            book = await self._portfolio_store.load(mode=self._c.settings.trading_mode.value)
+        except Exception as exc:  # a cold store must not stop startup
+            _logger.warning("portfolio_state_load_failed", error=str(exc))
+            return
+        if book is None:
+            return
+        self._portfolio.restore(book)
+        _logger.info(
+            "portfolio_restored",
+            cash_usd=round(book.cash_usd, 4),
+            realized_pnl_usd=round(book.realized_pnl_usd, 4),
+            open_positions=len(book.positions),
+            saved_at=book.saved_at.isoformat() if book.saved_at else None,
+        )
+
     async def start(self) -> list[asyncio.Task[None]]:
         await self._restore_control_state()
+        await self._restore_portfolio()
         tasks = [asyncio.create_task(self._publish_status_loop(), name="risk-status")]
         _logger.info("risk_runtime_started", enabled=self._c.settings.risk.enabled)
         return tasks

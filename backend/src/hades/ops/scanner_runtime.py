@@ -151,6 +151,7 @@ class ScannerRuntime:
             s.scanner.source_list,
             poll_interval_seconds=s.scanner.poll_interval_seconds,
             timeout_seconds=s.scanner.source_timeout_seconds,
+            url_overrides=s.scanner.source_urls,
         )
         return DiscoveryEngine(
             sources,

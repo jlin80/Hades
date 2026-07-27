@@ -102,6 +102,59 @@ export interface ScannerStatus {
   live: ScannerLive;
 }
 
+
+// --- Portfolio ---------------------------------------------------------------
+
+export interface PortfolioLive {
+  starting_balance_usd?: number;
+  equity_usd?: number;
+  cash_usd?: number;
+  invested_usd?: number;
+  realized_pnl_usd?: number;
+  unrealized_pnl_usd?: number;
+  roi_pct?: number;
+  drawdown_pct?: number;
+  exposure_pct?: number;
+  open_positions?: number;
+  reserve_pct?: number;
+  available_usd?: number;
+  metrics?: Record<string, number>;
+  updated_at?: number;
+}
+
+export interface PortfolioStatus {
+  running: boolean;
+  live: PortfolioLive;
+}
+
+export interface PnlRow {
+  at: string | null;
+  kind: string;
+  mode: string;
+  amount_usd: number;
+}
+
+export interface EquityPoint {
+  t: string | null;
+  equity_usd: number;
+}
+
+export interface ExecutionMetrics {
+  mode?: string;
+  is_live?: boolean;
+  live_executor_available?: boolean;
+  counts?: Record<string, number>;
+  transaction_stats?: Record<string, number>;
+}
+
+export interface AnomalyRow {
+  subject: string;
+  kind: string;
+  field: string;
+  detail: string;
+  at: string | null;
+}
+
 // --- Wallet Intelligence -----------------------------------------------------
 
 export interface IntelligenceStatus {
@@ -351,6 +404,16 @@ export const api = {
   info: () => get<Record<string, unknown>>("/api/v1/info"),
   config: () => get<Record<string, unknown>>("/api/v1/config"),
   scannerStatus: () => get<ScannerStatus>("/api/v1/scanner/status"),
+  scannerAnomalies: () =>
+    get<{ anomalies: AnomalyRow[]; by_kind: Record<string, number> }>(
+      "/api/v1/scanner/anomalies?limit=50",
+    ),
+  portfolio: () => get<PortfolioStatus>("/api/v1/portfolio"),
+  portfolioCapital: () => get<PortfolioLive>("/api/v1/portfolio/capital"),
+  portfolioPnl: () => get<{ pnl: PnlRow[] }>("/api/v1/portfolio/pnl?limit=50"),
+  portfolioEquityCurve: () =>
+    get<{ points: EquityPoint[] }>("/api/v1/portfolio/equity-curve?limit=200"),
+  executionMetrics: () => get<ExecutionMetrics>("/api/v1/execution/metrics"),
   intelligenceStatus: () => get<IntelligenceStatus>("/api/v1/intelligence/status"),
   walletProfile: (address: string) =>
     get<WalletProfile>(`/api/v1/intelligence/wallet/${address}`),

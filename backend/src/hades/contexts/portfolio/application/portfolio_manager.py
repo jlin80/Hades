@@ -25,8 +25,13 @@ from hades.contexts.portfolio.domain.events import (
     PositionOpened,
     PositionUpdated,
 )
-from hades.contexts.portfolio.domain.models import ClosedTrade, PortfolioState
-from hades.contexts.portfolio.domain.ports import PortfolioHistoryStore
+from hades.contexts.portfolio.domain.models import (
+    ClosedTrade,
+    PersistedPortfolio,
+    PersistedPosition,
+    PortfolioState,
+)
+from hades.contexts.portfolio.domain.ports import PortfolioHistoryStore, PortfolioStateStore
 from hades.contexts.risk.domain.models import (
     CapitalSnapshot,
     DrawdownSnapshot,
@@ -41,6 +46,10 @@ from hades.shared_kernel.logging import get_logger
 
 _logger = get_logger("portfolio.manager")
 _EQUITY_CURVE_MAX = 10_000
+#: How many closed trades the persisted snapshot carries. Analytics, the loss
+#: streak and the rolling PnL windows all read from the recent tail; keeping the
+#: whole history here would grow one JSONB row without bound.
+_CLOSED_TRADES_MAX = 1_000
 
 
 class PortfolioManager:
@@ -54,12 +63,14 @@ class PortfolioManager:
         mode: str = "paper",
         event_bus: EventBus | None = None,
         history: PortfolioHistoryStore | None = None,
+        state_store: PortfolioStateStore | None = None,
     ) -> None:
         self._start = starting_balance_usd
         self._reserve_pct = reserve_pct
         self._mode = mode
         self._bus = event_bus
         self._history = history
+        self._state_store = state_store
 
         self._cash = starting_balance_usd
         self._realized = 0.0
@@ -232,11 +243,78 @@ class PortfolioManager:
                 out[strategy] = out.get(strategy, 0) + 1
         return out
 
+    # -- durability -----------------------------------------------------------
+
+    def snapshot(self) -> PersistedPortfolio:
+        """The book as it must be written to storage."""
+        return PersistedPortfolio(
+            starting_balance_usd=self._start,
+            cash_usd=self._cash,
+            realized_pnl_usd=self._realized,
+            fees_usd=self._fees,
+            slippage_usd=self._slippage,
+            peak_equity_usd=self._peak,
+            positions={
+                key: PersistedPosition(
+                    token=p.token,
+                    notional_usd=p.notional_usd,
+                    unrealized_pnl_usd=p.unrealized_pnl_usd,
+                    strategy=p.strategy,
+                    developer=p.developer,
+                    cluster=p.cluster,
+                    narrative=p.narrative,
+                    regime=p.regime,
+                    opened_at=p.opened_at,
+                )
+                for key, p in self._positions.items()
+            },
+            closed=tuple(self._closed[-_CLOSED_TRADES_MAX:]),
+            opens=tuple(self._opens),
+            equity_curve=tuple(self._equity_curve),
+            saved_at=datetime.now(UTC),
+        )
+
+    def restore(self, state: PersistedPortfolio) -> None:
+        """Rehydrate the book from storage (on startup, before any event).
+
+        The starting balance is *not* restored: it is configuration, and letting
+        a stored value win would make ``PAPER_STARTING_BALANCE_USD`` silently
+        inert. ROI is measured against the configured balance either way.
+        """
+        self._cash = state.cash_usd
+        self._realized = state.realized_pnl_usd
+        self._fees = state.fees_usd
+        self._slippage = state.slippage_usd
+        self._peak = max(state.peak_equity_usd, self._start)
+        self._positions = {
+            key: OpenPositionView(
+                token=p.token,
+                notional_usd=p.notional_usd,
+                unrealized_pnl_usd=p.unrealized_pnl_usd,
+                strategy=p.strategy,
+                developer=p.developer,
+                cluster=p.cluster,
+                narrative=p.narrative,
+                regime=p.regime,
+                opened_at=p.opened_at,
+            )
+            for key, p in state.positions.items()
+        }
+        self._closed = list(state.closed)
+        self._opens = deque(state.opens, maxlen=1000)
+        if state.equity_curve:
+            self._equity_curve = deque(state.equity_curve, maxlen=_EQUITY_CURVE_MAX)
+
     async def _recompute(self) -> None:
         st = self.state()
         equity = st.equity_usd
         self._peak = max(self._peak, equity)
         self._equity_curve.append(equity)
+        if self._state_store is not None:
+            try:
+                await self._state_store.save(self.snapshot(), mode=self._mode)
+            except Exception as exc:  # durability is best-effort, never blocking
+                _logger.warning("portfolio_state_save_failed", error=str(exc))
         if self._history is not None:
             try:
                 await self._history.record_equity(equity, mode=self._mode)

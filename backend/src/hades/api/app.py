@@ -38,9 +38,11 @@ from hades.api.routers import (
     version,
 )
 from hades.api.ws import routes as ws_routes
-from hades.bootstrap import build_container
-from hades.shared_kernel.config import get_settings
-from hades.shared_kernel.logging import get_logger
+from hades.bootstrap import Container, build_container
+from hades.shared_kernel.config import Settings, get_settings
+from hades.shared_kernel.logging import get_log_buffer, get_logger
+from hades.shared_kernel.logging.setup import set_log_shipper
+from hades.shared_kernel.logging.shipper import LogShipper, LogTailer
 
 _logger = get_logger("api")
 
@@ -51,12 +53,40 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     container = build_container(settings, role="api")
     app.state.container = container
     app.state.started_at = time.time()
+    # The API both ships its own lines and tails everyone else's, so the
+    # dashboard terminal shows the whole platform — above all the Worker,
+    # which hosts the entire trading pipeline and was previously invisible.
+    shipper, tailer = await _start_log_bridge(app, container, settings)
     _logger.info("api_started", env=settings.env)
     try:
         yield
     finally:
+        if tailer is not None:
+            await tailer.stop()
+        if shipper is not None:
+            set_log_shipper(None)
+            await shipper.stop()
         await container.shutdown()
         _logger.info("api_stopped")
+
+
+async def _start_log_bridge(
+    app: FastAPI, container: Container, settings: Settings
+) -> tuple[LogShipper | None, LogTailer | None]:
+    """Start log shipping + tailing, or return ``(None, None)`` if disabled.
+
+    Never fatal: if Redis is unreachable the terminal simply falls back to the
+    API's own lines, which is exactly the behaviour before this existed.
+    """
+    if not settings.observability.log_shipping_enabled:
+        return None, None
+    shipper = LogShipper(container.redis, role="api")
+    await shipper.start()
+    set_log_shipper(shipper)
+    tailer = LogTailer(container.redis, own_role="api")
+    await tailer.start(get_log_buffer())
+    app.state.log_tailer = tailer
+    return shipper, tailer
 
 
 def create_app() -> FastAPI:

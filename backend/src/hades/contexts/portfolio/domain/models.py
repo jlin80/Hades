@@ -13,6 +13,8 @@ from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
 
+from pydantic import Field
+
 from hades.contexts.common.domain.value_objects import Money, TokenRef
 from hades.contexts.portfolio.domain.events import (
     PositionClosed,
@@ -117,6 +119,55 @@ class ClosedTrade(ValueObject):
     @property
     def is_win(self) -> bool:
         return self.pnl_usd > 0
+
+
+class PersistedPosition(ValueObject):
+    """One open position as it is written to storage.
+
+    Deliberately a portfolio-owned shape rather than the risk context's
+    ``OpenPositionView``: the portfolio owns what it persists, and the domain
+    layer here depends on nothing but ``common``. The manager converts at the
+    boundary, which is also where a schema change would have to be handled.
+    """
+
+    token: TokenRef
+    notional_usd: float
+    unrealized_pnl_usd: float = 0.0
+    strategy: str = "default"
+    developer: str | None = None
+    cluster: str | None = None
+    narrative: str | None = None
+    regime: str = "unknown"
+    opened_at: datetime | None = None
+
+
+class PersistedPortfolio(ValueObject):
+    """Everything the Portfolio Manager must recover to survive a restart.
+
+    The manager kept its book purely in memory, so every worker restart silently
+    reset cash to the starting balance and dropped every open position — the book
+    of record was the least durable thing in the platform. This snapshot closes
+    that hole (deferred item H3).
+
+    Only *state* lives here, never derived figures: equity, exposure, ROI and
+    drawdown are recomputed from these on load, so a stale formula can never be
+    resurrected from storage.
+    """
+
+    starting_balance_usd: float
+    cash_usd: float
+    realized_pnl_usd: float = 0.0
+    fees_usd: float = 0.0
+    slippage_usd: float = 0.0
+    peak_equity_usd: float = 0.0
+    #: position_id -> the open position.
+    positions: dict[str, PersistedPosition] = Field(default_factory=dict)
+    #: Recent closed trades — the input to analytics and the win/loss streak.
+    closed: tuple[ClosedTrade, ...] = ()
+    #: Recent (opened_at, strategy) pairs behind the trade-rate limits.
+    opens: tuple[tuple[datetime, str], ...] = ()
+    equity_curve: tuple[float, ...] = ()
+    saved_at: datetime | None = None
 
 
 class PortfolioState(ValueObject):

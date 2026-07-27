@@ -21,8 +21,11 @@ from hades.contexts.scanner.infrastructure.sources.base import (
     make_candidate,
 )
 
+# ``frontend-api.pump.fun`` was retired — it answers Cloudflare 530 ("origin
+# unreachable"), so this source was permanently down. pump.fun moved the feed to
+# ``frontend-api-v3``; the payload shape is unchanged, so only the host moves.
 _DEFAULT_URL = (
-    "https://frontend-api.pump.fun/coins"
+    "https://frontend-api-v3.pump.fun/coins"
     "?offset=0&limit=50&sort=created_timestamp&order=DESC&includeNsfw=false"
 )
 

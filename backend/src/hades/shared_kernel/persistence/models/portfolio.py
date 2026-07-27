@@ -17,6 +17,24 @@ from hades.shared_kernel.persistence.models._mixins import TimestampMixin, UUIDP
 _AMOUNT = Numeric(38, 18)
 
 
+class PortfolioStateRecord(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """The latest live book — one logical row per trading mode.
+
+    ``portfolio_history`` is an append-only series for charts; this is the state
+    the Portfolio Manager reloads on startup so cash, open positions and realised
+    PnL are not reset to the starting balance by every restart.
+    """
+
+    __tablename__ = "portfolio_state"
+
+    mode: Mapped[str] = mapped_column(String(10), unique=True, index=True, nullable=False)
+    cash_usd: Mapped[Decimal | None] = mapped_column(_AMOUNT)
+    realized_pnl_usd: Mapped[Decimal | None] = mapped_column(_AMOUNT)
+    peak_equity_usd: Mapped[Decimal | None] = mapped_column(_AMOUNT)
+    open_positions: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    state: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+
+
 class PortfolioHistory(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     """A full portfolio snapshot (exposure, PnL, position count) over time."""
 

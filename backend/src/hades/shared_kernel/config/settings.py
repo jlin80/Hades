@@ -125,6 +125,10 @@ class ObservabilitySettings(_Section):
     metrics_port: int = Field(default=9100, alias="METRICS_PORT")
     tracing_enabled: bool = Field(default=False, alias="TRACING_ENABLED")
     tracing_otlp_endpoint: str = Field(default="", alias="TRACING_OTLP_ENDPOINT")
+    # Ship each process's log lines through Redis so the dashboard terminal shows
+    # the whole platform and not just the API's own process. Fire-and-forget: a
+    # Redis outage degrades to per-process logs, never to a stalled service.
+    log_shipping_enabled: bool = Field(default=True, alias="LOG_SHIPPING_ENABLED")
 
 
 class SolanaSettings(_Section):
@@ -215,6 +219,12 @@ class ScannerSettings(_Section):
     whitelist_tokens: str = Field(default="", alias="WHITELIST_TOKENS")
     # Per-source HTTP request timeout.
     source_timeout_seconds: float = 12.0
+    # Per-source endpoint overrides, e.g.
+    # ``SCANNER_SOURCE_URLS={"dexscreener": "https://my-bridge/dex"}``.
+    # Each adapter ships a sensible default; this exists so pointing a source at a
+    # mirror, a proxy or a replacement API is a config change instead of a code
+    # edit. Unknown source names are ignored (the source simply is not built).
+    source_urls: dict[str, str] = Field(default_factory=dict)
 
     @property
     def source_list(self) -> list[str]:
@@ -382,6 +392,33 @@ class PositionSettings(_Section):
     trailing_distance_pct: float = 10
 
 
+class MarketSettings(_Section):
+    """The price feed that marks open positions to market.
+
+    Without a price oracle the Paper Executor falls back to a unit price
+    (quantity == USD), which keeps *costs* honest but makes every entry price
+    1.0 — and a take-profit measured against 1.0 is meaningless. This section
+    wires a real one.
+
+    ``price_source_url`` is the batch token endpoint a mint list is appended to;
+    the parser expects DexScreener's payload shape. Point it at a mirror or a
+    proxy freely, but a substitute must return that shape or the oracle simply
+    reports no price (and the platform degrades, it does not break).
+    """
+
+    model_config = SettingsConfigDict(env_prefix="MARKET_", extra="ignore", env_file=".env")
+
+    price_oracle_enabled: bool = True
+    price_source_url: str = "https://api.dexscreener.com/latest/dex/tokens/"
+    # A quote is reused for this long before the oracle re-fetches. Position
+    # monitoring polls far more often than prices meaningfully move, and the
+    # upstream endpoint is unauthenticated and rate-limited.
+    price_cache_ttl_seconds: float = 15.0
+    price_timeout_seconds: float = 8.0
+    # DexScreener accepts up to 30 comma-separated mints per request.
+    price_batch_size: int = 30
+
+
 class ExecutionSettings(_Section):
     """Execution Engine tuning — shared by the paper and live executors.
 
@@ -411,6 +448,11 @@ class ExecutionSettings(_Section):
     quote_mint: str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
     # How often the runtime publishes its execution status snapshot to Redis.
     status_interval_seconds: float = 5.0
+    # The Position Monitor: marks open positions to market and fires the
+    # approved take-profit / stop-loss / trailing exits. Disabling it means
+    # positions are opened and never closed — leave it on.
+    position_monitor_enabled: bool = True
+    position_monitor_interval_seconds: float = 5.0
 
 
 class PaperSettings(_Section):
@@ -582,6 +624,12 @@ class ResearchSettings(_Section):
     promo_min_sharpe: float = 1.0
     promo_max_drawdown: float = 0.25
     promo_min_profit_factor: float = 1.3
+    # Inbox for candidate bundles produced by the *external* Hades Research Lab
+    # (its own repository and stack). An operator drops bundles here and runs the
+    # importer; the lab itself has no write path into this process. Imported
+    # candidates land as TRAINED — never promoted. See
+    # ``hades.contexts.learning.domain.candidates``.
+    candidate_inbox: str = Field(default="/app/research/inbox", alias="RESEARCH_CANDIDATE_INBOX")
 
 
 class StrategySettings(_Section):
@@ -733,6 +781,7 @@ class Settings(BaseSettings):
     security: SecuritySettings = Field(default_factory=SecuritySettings)
     risk: RiskSettings = Field(default_factory=RiskSettings)
     position: PositionSettings = Field(default_factory=PositionSettings)
+    market: MarketSettings = Field(default_factory=MarketSettings)
     execution: ExecutionSettings = Field(default_factory=ExecutionSettings)
     paper: PaperSettings = Field(default_factory=PaperSettings)
     notification: NotificationSettings = Field(default_factory=NotificationSettings)

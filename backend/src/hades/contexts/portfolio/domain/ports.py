@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
-from hades.contexts.portfolio.domain.models import PortfolioState, Position
+from hades.contexts.portfolio.domain.models import (
+    PersistedPortfolio,
+    PortfolioState,
+    Position,
+)
 from hades.shared_kernel.domain.identifiers import EntityId
 
 
@@ -35,3 +39,18 @@ class PortfolioHistoryStore(Protocol):
     async def record_pnl(
         self, amount_usd: float, *, kind: str, mode: str, mint: str | None = None
     ) -> None: ...
+
+
+@runtime_checkable
+class PortfolioStateStore(Protocol):
+    """Persists and restores the live book so it survives a restart.
+
+    Distinct from :class:`PortfolioHistoryStore`, which is an append-only time
+    series for charts: this holds the single latest *state*, and it is read back
+    on startup. Keyed by trading mode so a paper book and a live book can never
+    be confused for one another.
+    """
+
+    async def load(self, *, mode: str) -> PersistedPortfolio | None: ...
+
+    async def save(self, state: PersistedPortfolio, *, mode: str) -> None: ...

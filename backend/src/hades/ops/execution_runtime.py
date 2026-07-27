@@ -28,9 +28,11 @@ from hades.contexts.execution.application.factory import (
     build_execution_engine,
 )
 from hades.contexts.execution.application.metrics import ExecutionMetrics
+from hades.contexts.execution.application.position_monitor import PositionMonitor
 from hades.contexts.execution.application.trading_mode import TradingModeService
 from hades.contexts.execution.application.wallet_manager import WalletManager
 from hades.contexts.execution.infrastructure.trading_mode_repository import TradingModeRepository
+from hades.contexts.market.infrastructure.price_oracle import DexScreenerPriceOracle
 from hades.contexts.risk.domain.events import TradeApproved
 from hades.shared_kernel.cache import CacheService
 from hades.shared_kernel.domain.events import DomainEvent
@@ -66,16 +68,59 @@ class ExecutionRuntime:
         )
         self._wallet = WalletManager(container.settings.wallet)
 
+        # A real price grounds the paper fill (without it every entry price is
+        # 1.0) and is what the Position Monitor marks against. Shared by both.
+        self._oracle = self._build_oracle()
+
         self._bundle: ExecutionEngineBundle = build_execution_engine(
             container.settings,
             event_bus=container.event_bus,
             notifier=container.notification,
             mode_provider=self._resolve_mode,
             metrics=self._metrics,
+            price_oracle=self._oracle,
             # Live adapters (signer/quote/rpc) are supplied in a later phase; until
             # then the engine is paper-only regardless of the gate — fail-safe.
         )
+        self._monitor = self._build_monitor()
         self._register()
+
+    def _build_oracle(self) -> DexScreenerPriceOracle | None:
+        m = self._c.settings.market
+        if not m.price_oracle_enabled:
+            _logger.warning(
+                "price_oracle_disabled",
+                note="paper fills use a unit price and positions cannot be marked",
+            )
+            return None
+        return DexScreenerPriceOracle(
+            url=m.price_source_url,
+            cache_ttl_seconds=m.price_cache_ttl_seconds,
+            timeout_seconds=m.price_timeout_seconds,
+            batch_size=m.price_batch_size,
+        )
+
+    def _build_monitor(self) -> PositionMonitor | None:
+        e = self._c.settings.execution
+        if not e.position_monitor_enabled:
+            _logger.warning(
+                "position_monitor_disabled",
+                note="positions will be opened and never closed",
+            )
+            return None
+        if self._oracle is None:
+            _logger.warning(
+                "position_monitor_not_built",
+                reason="no price oracle — an exit cannot be evaluated without a mark",
+            )
+            return None
+        return PositionMonitor(
+            engine=self._bundle.engine,
+            price_oracle=self._oracle,
+            event_bus=self._c.event_bus,
+            interval_seconds=e.position_monitor_interval_seconds,
+            max_slippage_bps=e.max_slippage_bps,
+        )
 
     async def _resolve_mode(self) -> str:
         status = await self._mode_service.current()
@@ -83,6 +128,8 @@ class ExecutionRuntime:
 
     def _register(self) -> None:
         self._c.event_bus.subscribe(TradeApproved.__name__, self._on_trade_approved)
+        if self._monitor is not None:
+            self._monitor.register(self._c.event_bus)
 
     async def _on_trade_approved(self, event: DomainEvent) -> None:
         if not isinstance(event, TradeApproved):
@@ -96,15 +143,23 @@ class ExecutionRuntime:
 
     async def start(self) -> list[asyncio.Task[None]]:
         tasks = [asyncio.create_task(self._publish_status_loop(), name="execution-status")]
+        if self._monitor is not None:
+            tasks.extend(await self._monitor.start())
         _logger.info(
             "execution_runtime_started",
             enabled=self._c.settings.execution.enabled,
             live_executor=self._bundle.live_enabled,
+            price_oracle=self._oracle is not None,
+            position_monitor=self._monitor is not None,
         )
         return tasks
 
     async def stop(self) -> None:
         self._stop.set()
+        if self._monitor is not None:
+            await self._monitor.stop()
+        if self._oracle is not None:
+            await self._oracle.aclose()
         _logger.info("execution_runtime_stopped")
 
     # -- dashboard status -----------------------------------------------------
@@ -118,6 +173,9 @@ class ExecutionRuntime:
             "is_live": mode.is_live,
             "live_gate_enabled": mode.live_gate_enabled,
             "live_executor_available": self._bundle.live_enabled,
+            "price_oracle_available": self._oracle is not None,
+            "position_monitor_running": self._monitor is not None,
+            "positions_monitored": self._monitor.tracked if self._monitor else 0,
             "orders": self._bundle.order_manager.counts(),
             "recent_orders": self._bundle.order_manager.recent(limit=20),
             "recent_transactions": self._bundle.transaction_manager.recent(limit=20),

@@ -63,6 +63,22 @@ def is_terminal(state: OrderState) -> bool:
     return state in _TERMINAL_STATES
 
 
+# -- risk-envelope tag keys ---------------------------------------------------
+# The Risk Manager approves a size *and* the exit envelope around it (take-profit,
+# stop-loss, trailing). Tags are the pass-through channel that carries the
+# envelope from the approval, through the order, onto ``PositionOpened`` — which
+# is where the Position Monitor picks it up. Both writer (ExecutionEngine) and
+# reader (PositionMonitor) key off these constants so the contract is one edit.
+
+TAG_TAKE_PROFIT_PCT = "take_profit_pct"
+TAG_STOP_LOSS_PCT = "stop_loss_pct"
+TAG_TRAILING_ENABLED = "trailing_enabled"
+TAG_TRAILING_ACTIVATION_PCT = "trailing_activation_pct"
+TAG_TRAILING_DISTANCE_PCT = "trailing_distance_pct"
+#: Why a SELL was issued — surfaced on ``PositionClosed`` and the trade log.
+TAG_EXIT_REASON = "exit_reason"
+
+
 class OrderRequest(ValueObject):
     """An intent to trade handed to an :class:`Executor` (paper or live).
 

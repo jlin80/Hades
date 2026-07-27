@@ -21,6 +21,12 @@ from hades.contexts.scanner.infrastructure.sources.base import (
     make_candidate,
 )
 
+# NOTE (verified 2026-07-26 from a live host): this endpoint answers 404 — the
+# provider moved or retired it. It is left as-is rather than guessed at, because a
+# wrong URL is worse than a known-bad one: it would fail in a way that looks like
+# a transient outage. Point it somewhere real with
+# ``SCANNER_SOURCE_URLS={"jupiter": "…"}`` (the parser below still expects this
+# provider's payload shape), or leave this source out of ``SCANNER_SOURCES``.
 _DEFAULT_URL = "https://api.jup.ag/tokens/v1/new"
 
 

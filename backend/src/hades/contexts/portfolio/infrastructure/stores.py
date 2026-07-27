@@ -12,12 +12,15 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from hades.contexts.portfolio.domain.models import PortfolioState
+from sqlalchemy import select
+
+from hades.contexts.portfolio.domain.models import PersistedPortfolio, PortfolioState
 from hades.shared_kernel.persistence.database import Database
 from hades.shared_kernel.persistence.models.portfolio import (
     EquityCurve,
     PnLHistory,
     PortfolioHistory,
+    PortfolioStateRecord,
 )
 
 
@@ -43,6 +46,64 @@ class InMemoryPortfolioHistoryStore:
         self, amount_usd: float, *, kind: str, mode: str, mint: str | None = None
     ) -> None:
         self.pnl.append((kind, amount_usd))
+
+
+class InMemoryPortfolioStateStore:
+    """Keeps the latest book in process — tests and single-process runs.
+
+    It does not survive a restart, which is exactly what it claims: without a
+    database the platform is honest about starting from the opening balance
+    rather than pretending otherwise.
+    """
+
+    def __init__(self) -> None:
+        self._states: dict[str, PersistedPortfolio] = {}
+
+    async def load(self, *, mode: str) -> PersistedPortfolio | None:
+        return self._states.get(mode)
+
+    async def save(self, state: PersistedPortfolio, *, mode: str) -> None:
+        self._states[mode] = state
+
+
+class PostgresPortfolioStateStore:
+    """Upserts and loads the single durable book row per trading mode."""
+
+    def __init__(self, database: Database) -> None:
+        self._db = database
+
+    async def load(self, *, mode: str) -> PersistedPortfolio | None:
+        async with self._db.session() as session:
+            row = await session.scalar(
+                select(PortfolioStateRecord).where(PortfolioStateRecord.mode == mode)
+            )
+        if row is None or not row.state:
+            return None
+        return PersistedPortfolio.model_validate(row.state)
+
+    async def save(self, state: PersistedPortfolio, *, mode: str) -> None:
+        payload = state.model_dump(mode="json")
+        async with self._db.session() as session:
+            row = await session.scalar(
+                select(PortfolioStateRecord).where(PortfolioStateRecord.mode == mode)
+            )
+            if row is None:
+                session.add(
+                    PortfolioStateRecord(
+                        mode=mode,
+                        cash_usd=_dec(state.cash_usd),
+                        realized_pnl_usd=_dec(state.realized_pnl_usd),
+                        peak_equity_usd=_dec(state.peak_equity_usd),
+                        open_positions=len(state.positions),
+                        state=payload,
+                    )
+                )
+            else:
+                row.cash_usd = _dec(state.cash_usd)
+                row.realized_pnl_usd = _dec(state.realized_pnl_usd)
+                row.peak_equity_usd = _dec(state.peak_equity_usd)
+                row.open_positions = len(state.positions)
+                row.state = payload
 
 
 class PostgresPortfolioHistoryStore:

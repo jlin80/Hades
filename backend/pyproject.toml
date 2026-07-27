@@ -5,7 +5,7 @@ name = "hades"
 dynamic = ["version"]
 description = "Hades — professional quantitative platform for Solana meme coins."
 requires-python = ">=3.12"
-readme = "../hades.md"
+readme = { text = "Hades — professional quantitative platform for Solana meme coins.", content-type = "text/plain" }
 
 # Runtime dependencies. Pinned with lower bounds; the Docker image resolves the
 # exact versions. Kept intentionally lean for Phase 1 (foundations).

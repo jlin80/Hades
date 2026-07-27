@@ -45,6 +45,7 @@ from hades.shared_kernel.persistence.models.portfolio import (
     EquityCurve,
     PnLHistory,
     PortfolioHistory,
+    PortfolioStateRecord,
 )
 from hades.shared_kernel.persistence.models.research import (
     AcceptedOpportunity,
@@ -113,6 +114,7 @@ __all__ = [
     "PaperTrade",
     "PnLHistory",
     "PortfolioHistory",
+    "PortfolioStateRecord",
     "Position",
     "RejectedOpportunity",
     "ResearchBacktestRecord",

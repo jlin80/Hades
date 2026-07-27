@@ -21,7 +21,16 @@ from hades.contexts.scanner.infrastructure.sources.base import (
     pick_base_mint,
 )
 
-_DEFAULT_URL = "https://api-v3.raydium.io/pools/info/list?poolType=all&poolSortField=created&sortType=desc&pageSize=100&page=1"
+# ``poolSortField=created`` is not a value Raydium v3 accepts (it takes
+# ``default``, ``liquidity``, ``volume24h``, ``fee24h``, ``apr24h``, …). The API
+# answers 500 rather than 400, so this source failed on every single poll.
+#
+# The honest cost of the fix: v3 exposes no "newest pools" ordering, so this
+# source no longer surfaces brand-new pools preferentially — it returns Raydium's
+# default ranking, and new listings are found only once they rank into the first
+# page. Discovery of fresh launches leans on the other sources; the dedup registry
+# means re-seeing the same top pools is cheap, not harmful.
+_DEFAULT_URL = "https://api-v3.raydium.io/pools/info/list?poolType=all&poolSortField=default&sortType=desc&pageSize=100&page=1"
 
 
 class RaydiumSource(HttpPollingSource):

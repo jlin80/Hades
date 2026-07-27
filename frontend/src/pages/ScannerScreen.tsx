@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, type ScannerStatus } from "../api/client";
+import { api, type AnomalyRow, type ScannerStatus } from "../api/client";
 import { Badge, PageHeader, Panel, Row, StatusDot } from "../ui";
 
 function Stat({ label, value }: { label: string; value: string | number }) {
@@ -13,9 +13,20 @@ function Stat({ label, value }: { label: string; value: string | number }) {
 
 export function ScannerScreen() {
   const [status, setStatus] = useState<ScannerStatus | null>(null);
+  const [anomalies, setAnomalies] = useState<AnomalyRow[]>([]);
+  const [byKind, setByKind] = useState<Record<string, number>>({});
 
   useEffect(() => {
-    const load = () => api.scannerStatus().then(setStatus).catch(() => undefined);
+    const load = () => {
+      api.scannerStatus().then(setStatus).catch(() => undefined);
+      api
+        .scannerAnomalies()
+        .then((r) => {
+          setAnomalies(r.anomalies);
+          setByKind(r.by_kind);
+        })
+        .catch(() => undefined);
+    };
     load();
     const timer = setInterval(load, 5000);
     return () => clearInterval(timer);
@@ -78,6 +89,37 @@ export function ScannerScreen() {
                 <StatusDot status={e.status} />
                 {e.name === live.rpc_active && <Badge tone="success">active</Badge>}
                 {e.latency_ms.toFixed(0)} ms · health {e.health_score.toFixed(0)} · {e.total_failures} fails
+              </span>
+            }
+          />
+        ))}
+      </Panel>
+
+      {/* A total on its own is not actionable: 420 malformed payloads from one
+          broken source and 420 tokens missing a social link call for completely
+          different responses. The breakdown is what makes the number mean something. */}
+      <Panel title="Data-quality anomalies">
+        {Object.keys(byKind).length === 0 && (
+          <p className="text-sm text-hades-muted">No anomalies recorded.</p>
+        )}
+        <div className="mb-3 flex flex-wrap gap-2">
+          {Object.entries(byKind).map(([kind, count]) => (
+            <Badge key={kind} tone={kind === "malformed" ? "danger" : "neutral"}>
+              {kind}: {count}
+            </Badge>
+          ))}
+        </div>
+        {anomalies.slice(0, 15).map((a, i) => (
+          <Row
+            key={`${a.subject}-${i}`}
+            label={
+              <span className="font-mono text-xs">
+                {a.subject.slice(0, 10)}… · {a.field}
+              </span>
+            }
+            value={
+              <span className="text-xs">
+                <span className="text-hades-muted">{a.kind}</span> — {a.detail}
               </span>
             }
           />

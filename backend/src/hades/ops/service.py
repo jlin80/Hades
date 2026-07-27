@@ -20,6 +20,8 @@ from hades.bootstrap import Container, build_container
 from hades.ops.liveness import Liveness
 from hades.shared_kernel.events import RedisEventBus
 from hades.shared_kernel.logging import get_logger
+from hades.shared_kernel.logging.setup import set_log_shipper
+from hades.shared_kernel.logging.shipper import LogShipper
 
 
 class ServiceProcess:
@@ -36,6 +38,7 @@ class ServiceProcess:
         self._liveness = Liveness(
             self.role, directory=self._container.settings.watchdog.liveness_dir
         )
+        self._shipper: LogShipper | None = None
 
     @property
     def container(self) -> Container:
@@ -54,6 +57,7 @@ class ServiceProcess:
             "service_started", role=self.role, instance_id=self._container.settings.instance_id
         )
         self._start_metrics_server()
+        await self._start_log_shipping()
 
         # If we're on the Redis transport, run the consumer loop for this service.
         bus = self._container.event_bus
@@ -65,6 +69,19 @@ class ServiceProcess:
 
         await self._stop.wait()
         await self._shutdown()
+
+    async def _start_log_shipping(self) -> None:
+        """Ship this process's log lines so the dashboard terminal can show them.
+
+        Without this the API can only ever display its own lines, which made the
+        Worker — where the whole trading pipeline lives — invisible from the UI.
+        """
+        if not self._container.settings.observability.log_shipping_enabled:
+            return
+        self._shipper = LogShipper(self._container.redis, role=self.role)
+        self._tasks.append(await self._shipper.start())
+        set_log_shipper(self._shipper)
+        self._log.info("log_shipping_started", role=self.role)
 
     def _start_metrics_server(self) -> None:
         """Expose this process's metrics for Prometheus (background services have

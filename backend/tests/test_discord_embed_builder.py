@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from hades.contexts.notification.domain.ports import Notification, Severity
+from hades.contexts.notification.infrastructure.discord_notifier import DiscordNotifier
 from hades.contexts.notification.infrastructure.embed_builder import (
     _CATEGORY_COLORS,
     Category,
@@ -42,3 +43,53 @@ def test_footer_and_timestamp_present() -> None:
     embed = EmbedBuilder().build(_note(Severity.WARNING, {"container": "worker"}))
     assert "WARNING" in embed["footer"]["text"]  # type: ignore[index]
     assert embed["timestamp"]
+
+
+# -- routing ------------------------------------------------------------------
+
+
+def _notifier() -> DiscordNotifier:
+    return DiscordNotifier(
+        "https://discord.test/main",
+        alerts_webhook_url="https://discord.test/alerts",
+        trades_webhook_url="https://discord.test/trades",
+    )
+
+
+def test_trade_notifications_reach_the_dedicated_trades_channel() -> None:
+    # Every emitter tags "trades" (plural). The router only matched the singular,
+    # so a configured trades webhook silently received nothing.
+    notification = Notification(
+        title="BUY filled · BONK",
+        body="100 USD @ 0.42",
+        severity=Severity.INFO,
+        tags={"topic": "trades", "mode": "paper"},
+    )
+
+    assert _notifier()._route(notification) == "https://discord.test/trades"
+
+
+def test_warnings_reach_the_alerts_channel() -> None:
+    notification = Notification(
+        title="RPC degraded", body="latency", severity=Severity.WARNING, tags={"topic": "health"}
+    )
+
+    assert _notifier()._route(notification) == "https://discord.test/alerts"
+
+
+def test_everything_else_falls_back_to_the_main_channel() -> None:
+    notification = Notification(
+        title="Study finished", body="", severity=Severity.INFO, tags={"topic": "research"}
+    )
+
+    assert _notifier()._route(notification) == "https://discord.test/main"
+
+
+def test_unset_optional_webhooks_fall_back_to_the_main_one() -> None:
+    # A single-webhook deployment must still receive trade notifications.
+    notifier = DiscordNotifier("https://discord.test/only")
+    notification = Notification(
+        title="SELL filled", body="", severity=Severity.INFO, tags={"topic": "trades"}
+    )
+
+    assert notifier._route(notification) == "https://discord.test/only"

@@ -13,6 +13,12 @@ verifiably enabled.
 - **Production-readiness & closing report:** [`docs/PRODUCTION_READINESS.md`](docs/PRODUCTION_READINESS.md).
 - **Architecture deep-dive:** [`docs/architecture.md`](docs/architecture.md).
 - **Adversarial audit:** [`docs/TECHNICAL_AUDIT.md`](docs/TECHNICAL_AUDIT.md).
+- **Operating guide:** [`docs/OPERATING.md`](docs/OPERATING.md) — which process runs
+  what (the pipeline is in the **worker**, not the engine), how to see trades live,
+  and how to debug "the bot isn't doing anything".
+- **External Research Lab bridge:** [`docs/RESEARCH_LAB_BRIDGE.md`](docs/RESEARCH_LAB_BRIDGE.md)
+  — how a candidate from the separate Hades Research Lab repository is imported
+  (human-gated, never promoted on import).
 
 > **Status:** `v0.10.0` · Phase 11 (Production Hardening). **Paper trading only** — live
 > execution is hard-gated OFF and structurally impossible today (no live adapters are wired).

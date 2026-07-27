@@ -161,7 +161,9 @@ services:
       test: ["CMD", "python", "-m", "hades.ops.healthcheck"]
 
   # ---------------------------------------------------------------------------
-  # ENGINE — decision engine (skeleton in Phase 2; no strategies/scanner/AI)
+  # ENGINE — idle by design. The pipeline (scanner/security/intelligence/
+  # committee/strategy/risk/execution) runs in the WORKER service; this is a
+  # reserved slot for splitting the decision loop out later. See docs/OPERATING.md.
   # ---------------------------------------------------------------------------
   engine:
     <<: *app-base

@@ -95,3 +95,84 @@ async def test_raising_action_counts_as_failure() -> None:
         max_attempts=5,
     )
     assert await orch.recover("rpc", "") is False
+
+
+# -- escalation requires attempts to have actually been made ------------------
+
+
+async def test_a_component_with_no_action_never_escalates_to_emergency() -> None:
+    """The Watchdog can only reconnect its own Redis/Postgres and reload config.
+    `api`, `dashboard`, `resources` and `rpc` have no action wired there, so
+    counting "there was nothing to try" as a failed attempt tripped Emergency Mode
+    after three cycles — halting risk-taking for a reason no recovery could clear.
+    """
+    emergency, flags, captured = _emergency()
+    orchestrator = RecoveryOrchestrator(
+        [_Action("redis_reconnect", "redis", True)], emergency=emergency, notifier=_publisher()
+    )
+
+    for _ in range(10):
+        assert await orchestrator.recover("resources") is False
+
+    assert await flags.is_active() is False
+    assert captured == []
+
+
+async def test_a_component_with_a_failing_action_still_escalates() -> None:
+    # The guard above must not disarm real escalation.
+    emergency, flags, _ = _emergency()
+    orchestrator = RecoveryOrchestrator(
+        [_Action("redis_reconnect", "redis", False)],
+        emergency=emergency,
+        notifier=_publisher(),
+        max_attempts=3,
+    )
+
+    for _ in range(3):
+        assert await orchestrator.recover("redis") is False
+
+    assert await flags.is_active() is True
+
+
+async def test_recovery_stops_retrying_once_exhausted() -> None:
+    # Re-running actions every cycle produced "attempt=49 max_attempts=3", which
+    # reads as nonsense and buries real events.
+    action = _CountingAction("redis_reconnect", "redis")
+    emergency, _flags, _ = _emergency()
+    orchestrator = RecoveryOrchestrator(
+        [action], emergency=emergency, notifier=_publisher(), max_attempts=3
+    )
+
+    for _ in range(20):
+        await orchestrator.recover("redis")
+
+    assert action.calls == 3
+
+
+async def test_reset_lets_a_recovered_component_be_retried_again() -> None:
+    action = _CountingAction("redis_reconnect", "redis")
+    emergency, _flags, _ = _emergency()
+    orchestrator = RecoveryOrchestrator(
+        [action], emergency=emergency, notifier=_publisher(), max_attempts=3
+    )
+
+    for _ in range(5):
+        await orchestrator.recover("redis")
+    orchestrator.reset("redis")
+    await orchestrator.recover("redis")
+
+    assert action.calls == 4
+
+
+class _CountingAction(_Action):
+    def __init__(self, name: str, component: str) -> None:
+        super().__init__(name, component, False)
+        self.calls = 0
+
+    async def attempt(self) -> bool:
+        self.calls += 1
+        return False
+
+
+def _publisher() -> NotificationPublisher:
+    return NotificationPublisher(InMemoryEventBus())

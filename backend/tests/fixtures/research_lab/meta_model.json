@@ -1,0 +1,57 @@
+{
+  "bundle_format": "hades.candidate/v1",
+  "candidate_id": "meta-golden",
+  "checksum": "9bc311a2c09da96ec433d46955f14709d4142daa0b10f4fa9eeeb77044173df4",
+  "dataset_id": "ds-2026-07",
+  "evidence": {},
+  "feature_names": [
+    "liquidity",
+    "momentum",
+    "security"
+  ],
+  "heads": {
+    "hit_sl": {
+      "bias": 0.05,
+      "coefficients": {
+        "liquidity": 0.51,
+        "momentum": 0.33,
+        "security": 0.44
+      }
+    },
+    "hit_tp": {
+      "bias": 0.05,
+      "coefficients": {
+        "liquidity": 0.51,
+        "momentum": 0.33,
+        "security": 0.44
+      }
+    },
+    "roi_positive": {
+      "bias": 0.05,
+      "coefficients": {
+        "liquidity": 0.51,
+        "momentum": 0.33,
+        "security": 0.44
+      }
+    }
+  },
+  "kind": "committee_model",
+  "metrics": {
+    "auc": 0.75,
+    "samples": 1200.0
+  },
+  "model_kind": "logistic",
+  "name": "meta",
+  "notes": "meta fusion candidate",
+  "produced_at": "2026-07-25T20:02:09.760366+00:00",
+  "produced_by": "hades-research-lab",
+  "trained_on_samples": 1200,
+  "weights": {
+    "bias": 0.05,
+    "coefficients": {
+      "liquidity": 0.51,
+      "momentum": 0.33,
+      "security": 0.44
+    }
+  }
+}

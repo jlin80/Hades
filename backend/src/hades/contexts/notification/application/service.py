@@ -47,6 +47,10 @@ class NotificationService:
         self._notifiers = {n.channel: n for n in notifiers}
         self._min_severity = min_severity
         self._recorder = recorder
+        # A missing notifier is a *configuration* fact, not a per-event failure:
+        # it does not change between events, so warning on every one buried the
+        # real log under thousands of identical lines. Warn once per channel.
+        self._warned_channels: set[str] = set()
 
     def register(self, event_bus: EventBus) -> None:
         """Wire the service to the bus (call once at startup)."""
@@ -65,7 +69,17 @@ class NotificationService:
             record_id = await self._recorder.record_pending(event)
 
         if notifier is None:
-            _logger.warning("no_notifier_for_channel", channel=event.channel)
+            if event.channel not in self._warned_channels:
+                self._warned_channels.add(event.channel)
+                _logger.warning(
+                    "no_notifier_for_channel",
+                    channel=event.channel,
+                    note=(
+                        "notifications are recorded but not delivered — check "
+                        "NOTIFY_DISCORD_ENABLED and NOTIFY_DISCORD_WEBHOOK_URL "
+                        "reach the notification service. Logged once per channel."
+                    ),
+                )
             if self._recorder is not None and record_id is not None:
                 await self._recorder.mark_failed(record_id, "no notifier for channel")
             return

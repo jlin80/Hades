@@ -21,6 +21,15 @@ from hades.shared_kernel.config import get_settings
 
 
 def _check_http() -> int:
+    """Is *this API process* serving? Deliberately not "is the platform healthy".
+
+    Docker restarts the container when this fails, so it must key off the one
+    thing a restart can fix. ``/health`` reports an aggregate across Postgres,
+    Redis, RPC and every background process — none of which a restart of the API
+    repairs. Keying off that aggregate would let a slow RPC provider or a Redis
+    blip put the API into a restart loop and turn a dependency hiccup into a real
+    outage. Readiness gating on dependencies is ``/ready``'s job.
+    """
     settings = get_settings()
     url = f"http://127.0.0.1:{settings.api.port}/health"
     try:
@@ -29,7 +38,16 @@ def _check_http() -> int:
         return 1
     if resp.status_code != 200:
         return 1
-    return 0 if resp.json().get("status") != "unhealthy" else 1
+    try:
+        components = resp.json().get("components", [])
+    except ValueError:
+        return 1
+    # Serving a well-formed body is itself most of the proof; the api component
+    # is the explicit assertion about this process.
+    for component in components:
+        if component.get("name") == "api":
+            return 0 if component.get("status") != "unhealthy" else 1
+    return 0
 
 
 def _check_liveness(role: str, max_age: float) -> int:
