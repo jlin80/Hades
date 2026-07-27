@@ -24,19 +24,29 @@ router = APIRouter(tags=["websocket"])
 _TERMINAL_POLL_SECONDS = 0.5
 
 
+# A client that goes away mid-send does not always surface as
+# ``WebSocketDisconnect``: uvloop raises a bare ``RuntimeError`` ("the handler is
+# closed") when the transport is already gone, and starlette can raise on a
+# closed application state. Catching only ``WebSocketDisconnect`` meant every
+# closed tab produced a full ASGI traceback in the logs — noise that buries real
+# errors, and on a busy dashboard, a lot of it. A disconnect is normal operation,
+# not an error, so all three are treated the same: stop pushing and return.
+_DISCONNECTED = (WebSocketDisconnect, RuntimeError, ConnectionError)
+
+
 @router.websocket("/ws/terminal")
 async def terminal(websocket: WebSocket) -> None:
     await websocket.accept()
     buffer = get_log_buffer()
     last_seq, recent = buffer.recent(limit=200)
-    await websocket.send_json({"type": "snapshot", "records": recent})
     try:
+        await websocket.send_json({"type": "snapshot", "records": recent})
         while True:
             await asyncio.sleep(_TERMINAL_POLL_SECONDS)
             last_seq, new_records = buffer.read_since(last_seq)
             if new_records:
                 await websocket.send_json({"type": "append", "records": new_records})
-    except WebSocketDisconnect:
+    except _DISCONNECTED:
         return
 
 
@@ -49,17 +59,25 @@ async def status_stream(websocket: WebSocket) -> None:
     try:
         while True:
             s = container.settings
+            # Mirrors the REST /api/v1/status payload field for field. The
+            # dashboard types one `Status` shape and reads it from both; when
+            # this stream omitted `instance_id`/`live_gate_enabled` the header
+            # silently rendered them as `undefined`.
             await websocket.send_json(
                 {
                     "type": "status",
+                    "name": "hades",
                     "version": __version__,
-                    "environment": s.env,
-                    "trading_mode": s.trading_mode,
+                    "role": "api",
+                    "environment": str(s.env),
+                    "instance_id": s.instance_id,
+                    "trading_mode": str(s.trading_mode),
                     "is_live": s.is_live,
+                    "live_gate_enabled": s.live_trading_enabled,
                     "event_bus_transport": s.event_bus.transport,
                     "uptime_seconds": round(time.time() - started_at, 1),
                 }
             )
             await asyncio.sleep(interval)
-    except WebSocketDisconnect:
+    except _DISCONNECTED:
         return
