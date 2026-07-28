@@ -139,6 +139,15 @@ export interface EquityPoint {
   equity_usd: number;
 }
 
+/** Wallet identity and health. Never carries key material — by design. */
+export interface WalletHealth {
+  configured: boolean;
+  public_key: string | null;
+  balance_sol: number;
+  healthy: boolean;
+  detail: string;
+}
+
 export interface ExecutionMetrics {
   mode?: string;
   is_live?: boolean;
@@ -547,6 +556,7 @@ export const api = {
   portfolioEquityCurve: () =>
     get<{ points: EquityPoint[] }>("/api/v1/portfolio/equity-curve?limit=200"),
   executionMetrics: () => get<ExecutionMetrics>("/api/v1/execution/metrics"),
+  executionWallet: () => get<WalletHealth>("/api/v1/execution/wallet"),
   intelligenceStatus: () => get<IntelligenceStatus>("/api/v1/intelligence/status"),
   walletProfile: (address: string) =>
     get<WalletProfile>(`/api/v1/intelligence/wallet/${address}`),

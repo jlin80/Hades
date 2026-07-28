@@ -20,7 +20,14 @@ from hades.ops.config_manager import (
     PostgresRuntimeConfigStore,
     RuntimeConfigStore,
 )
+from hades.ops.execution_runtime import (
+    EXECUTION_STATUS_NAMESPACE,
+)
+from hades.ops.execution_runtime import (
+    STATUS_KEY as EXECUTION_STATUS_KEY,
+)
 from hades.ops.preflight import build_production_checklist
+from hades.shared_kernel.cache import CacheService
 
 
 def get_container(request: Request) -> Container:
@@ -56,10 +63,29 @@ def get_trading_mode_service(
     repository = (
         TradingModeRepository(container.database) if container.database is not None else None
     )
+
+    async def live_executor_available() -> bool:
+        """Ask the Worker whether it actually built a live executor.
+
+        The API cannot answer this from its own process — the Execution Engine
+        lives in the Worker, which publishes the fact in its status snapshot.
+        A missing or unreadable snapshot yields False, so an unreachable Worker
+        blocks the switch to live rather than waving it through.
+        """
+        cache = CacheService(container.redis, namespace=EXECUTION_STATUS_NAMESPACE)
+        try:
+            snapshot = await cache.get(EXECUTION_STATUS_KEY)
+        except Exception:
+            return False
+        if not isinstance(snapshot, dict):
+            return False
+        return snapshot.get("live_executor_available") is True
+
     return TradingModeService(
         container.settings,
         event_bus=container.event_bus,
         notifier=container.notification,
         repository=repository,
         checklist=build_production_checklist(container),
+        live_executor_probe=live_executor_available,
     )

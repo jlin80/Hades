@@ -226,6 +226,61 @@ Then, in order, because each step tells you whether the next one is worth taking
 7. Trading but the balance never moves? That is the *exit* half, not the entry
    half — see "Positions are marked and exited by the Position Monitor" above.
 
+## Who can reach the dashboard and API
+
+`API_BIND` and `DASHBOARD_BIND` control which interface each port is published
+on; both default to `127.0.0.1`. The API is unauthenticated by default
+(`API_AUTH_ENABLED=false`) and exposes POST endpoints that change the trading
+mode, reset the Kill Switch and trip the Circuit Breaker, so publishing it on
+`0.0.0.0` hands those controls to anything that can route to the host. A
+deployment was found doing exactly that.
+
+To reach it from your own machine, bind to the host's LAN address rather than
+all interfaces:
+
+```
+API_BIND=192.168.1.10
+DASHBOARD_BIND=192.168.1.10
+```
+
+A VPN address (Tailscale or similar) is better still: it survives a change of
+network and is not reachable from the LAN at large.
+
+## The trading wallet
+
+The private key is never entered into the dashboard and never travels over the
+API. It lives in a file mounted read-only into the **Worker alone** — the only
+service that signs — so a compromised API or dashboard cannot read it.
+`WalletManager` exposes the public key, the SOL balance and a health verdict,
+and nothing else.
+
+Provision it on the host, once:
+
+```bash
+mkdir -p secrets && chmod 700 secrets
+cp /path/to/your-keypair.json secrets/hades_wallet.json
+chmod 600 secrets/hades_wallet.json
+```
+
+Set `WALLET_PUBLIC_KEY` in `.env`, then start with the live overlay:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.live.yml up -d
+```
+
+The overlay is separate on purpose. A required secret makes `docker compose up`
+fail when the file is absent, which would break every paper deployment; opting
+in with `-f` also keeps going live an explicit act.
+
+**Live execution is not implemented yet.** There is no `TransactionSigner` and
+no swap quote provider, and `ExecutionRuntime` passes neither, so
+`build_execution_engine` never constructs a live executor. `ExecutionEngine`
+falls back to the paper executor for any mode it lacks an executor for — safe
+for capital, but it would let an operator switch to LIVE, pass every check, and
+read simulated fills as real ones. The `live_executor` readiness check exists to
+close that gap: it fails unless the Worker reports a live executor, so the
+switch is refused rather than silently faked.
+
 ## Turning the Research Lab on
 
 Two flags, and the second is the one people miss:
