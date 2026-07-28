@@ -33,7 +33,7 @@ import httpx
 
 from hades.shared_kernel.config.settings import RpcEndpointConfig, RpcSettings
 from hades.shared_kernel.errors.exceptions import InfrastructureError
-from hades.shared_kernel.logging import get_logger
+from hades.shared_kernel.logging import describe, get_logger
 from hades.shared_kernel.observability import MetricsRegistry
 
 _logger = get_logger("solana.rpc")
@@ -317,7 +317,9 @@ class RpcManager:
         except Exception as exc:  # any transport error → failover
             self._record_failure(state, str(exc))
             self._count(state, "error")
-            _logger.warning("rpc_call_failed", endpoint=state.name, method=method, error=str(exc))
+            _logger.warning(
+                "rpc_call_failed", endpoint=state.name, method=method, error=describe(exc)
+            )
             return False, None, str(exc)
 
         if isinstance(body, dict) and body.get("error") is not None:

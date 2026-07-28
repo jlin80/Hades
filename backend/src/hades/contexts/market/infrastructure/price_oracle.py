@@ -27,7 +27,7 @@ from typing import Any
 import httpx
 
 from hades.contexts.common.domain.value_objects import TokenRef
-from hades.shared_kernel.logging import get_logger
+from hades.shared_kernel.logging import describe, get_logger
 
 _logger = get_logger("market.price_oracle")
 
@@ -113,7 +113,7 @@ class DexScreenerPriceOracle:
             try:
                 payload = await self._fetch(client, chunk)
             except Exception as exc:  # a dead feed must not break the caller
-                _logger.warning("price_fetch_failed", mints=len(chunk), error=str(exc))
+                _logger.warning("price_fetch_failed", mints=len(chunk), error=describe(exc))
                 continue
             out.update(_parse_prices(payload))
         return out
