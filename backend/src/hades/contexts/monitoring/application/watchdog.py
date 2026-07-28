@@ -41,6 +41,7 @@ class Watchdog:
         notifier: NotificationPublisher | None = None,
         repository: MonitoringRepository | None = None,
         recovery: RecoveryOrchestrator | None = None,
+        unhealthy_after: int = 3,
     ) -> None:
         self._health = health_monitor
         self._metrics = metrics
@@ -52,6 +53,9 @@ class Watchdog:
         self._notifier = notifier
         self._repo = repository
         self._recovery = recovery
+        #: Consecutive failed probes required before a component is acted on.
+        self._unhealthy_after = max(1, unhealthy_after)
+        self._consecutive_bad: dict[str, int] = {}
         self._stale_reported: set[str] = set()
         self._cpu_gauge = metrics.gauge("hades_cpu_percent", "Host CPU utilisation percent")
         self._mem_gauge = metrics.gauge("hades_memory_percent", "Host memory utilisation percent")
@@ -78,19 +82,44 @@ class Watchdog:
         await self._check_liveness()
 
     async def _drive_recovery(self, health: SystemHealth) -> None:
-        """Ask the orchestrator to heal unhealthy components; reset healthy ones."""
+        """Heal components that are *persistently* unhealthy; reset healthy ones.
+
+        Recovery used to fire on the first non-healthy probe. That is too eager
+        when the remedy is destructive: ``PostgresReconnectAction`` disposes the
+        connection pool, so one timed-out probe against a perfectly healthy
+        database tore down every pooled connection and forced them all to be
+        rebuilt. On a contended host that is a way to *cause* the outage it is
+        meant to fix, and a deployment showed the shape of it — recoveries every
+        few seconds alongside ``FATAL: sorry, too many clients already``.
+
+        A component must therefore fail ``unhealthy_after`` consecutive probes
+        before anything is done to it. A single blip is now noise to be ignored,
+        which is what it always was.
+        """
         if self._recovery is None:
             return
         for component in health.components:
             if component.status is HealthStatus.HEALTHY:
+                if self._consecutive_bad.pop(component.name, 0):
+                    _logger.debug("component_probe_recovered_on_its_own", component=component.name)
                 self._recovery.reset(component.name)
-            else:
-                try:
-                    await self._recovery.recover(component.name, component.detail or "")
-                except Exception as exc:  # recovery must never break the loop
-                    _logger.error(
-                        "recovery_failed", component=component.name, error=str(exc)
-                    )
+                continue
+
+            strikes = self._consecutive_bad.get(component.name, 0) + 1
+            self._consecutive_bad[component.name] = strikes
+            if strikes < self._unhealthy_after:
+                _logger.debug(
+                    "component_unhealthy_below_threshold",
+                    component=component.name,
+                    strikes=strikes,
+                    needed=self._unhealthy_after,
+                )
+                continue
+
+            try:
+                await self._recovery.recover(component.name, component.detail or "")
+            except Exception as exc:  # recovery must never break the loop
+                _logger.error("recovery_failed", component=component.name, error=str(exc))
 
     def _export_resources(self) -> None:
         sample = self._resource_probe.sample()

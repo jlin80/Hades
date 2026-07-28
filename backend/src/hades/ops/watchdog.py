@@ -118,6 +118,9 @@ class WatchdogProcess(ServiceProcess):
             notifier=self._container.notification,
             repository=repository,
             recovery=recovery,
+            # WATCHDOG_UNHEALTHY_AFTER_MISSED_BEATS existed as a setting that
+            # nothing consulted; recovery fired on the first bad probe.
+            unhealthy_after=wd.unhealthy_after_missed_beats,
         )
         self._tasks.append(asyncio.create_task(watchdog.run(self._stop)))
         self._log.info("watchdog_process_ready", probes=[p.name for p in probes])
