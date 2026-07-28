@@ -168,6 +168,69 @@ class PositionMonitor:
             peak_price=entry,
         )
 
+    def resume(
+        self,
+        *,
+        position_id: str,
+        token: TokenRef,
+        entry_price: Decimal,
+        quantity: Decimal,
+        tags: dict[str, str],
+        peak_price: Decimal | None = None,
+    ) -> bool:
+        """Take a position opened before this process started back under watch.
+
+        The monitor learns about positions only from live ``PositionOpened``
+        events, but the portfolio book is persisted and rehydrates on startup.
+        Without this, a position that survived a restart was owned by the book
+        and watched by nobody: never marked to market, and unreachable by the
+        take-profit or stop-loss approved for it. It could only ever be closed
+        by hand.
+
+        ``peak_price`` restores the trailing high-water mark where it is known;
+        falling back to the entry price is deliberately conservative, since it
+        can only place the trailing stop lower than the true peak would.
+        """
+        if entry_price <= 0 or quantity <= 0:
+            _logger.warning(
+                "position_not_resumed",
+                position_id=position_id,
+                reason="non-positive entry price or quantity",
+            )
+            return False
+        if position_id in self._positions:
+            return False
+        peak = peak_price if peak_price is not None and peak_price > entry_price else entry_price
+        trailing_enabled = tags.get(TAG_TRAILING_ENABLED, "false") == "true"
+        activation = _as_float(tags.get(TAG_TRAILING_ACTIVATION_PCT), 0.0)
+        monitored = _Monitored(
+            position_id=position_id,
+            token=token,
+            entry_price=entry_price,
+            quantity=quantity,
+            take_profit_pct=_as_float(tags.get(TAG_TAKE_PROFIT_PCT), 0.0),
+            stop_loss_pct=_as_float(tags.get(TAG_STOP_LOSS_PCT), 0.0),
+            trailing_enabled=trailing_enabled,
+            trailing_activation_pct=activation,
+            trailing_distance_pct=_as_float(tags.get(TAG_TRAILING_DISTANCE_PCT), 0.0),
+            peak_price=peak,
+        )
+        # Re-arm the trailing stop if the recovered peak already cleared the
+        # activation level, so a restart cannot silently disarm it.
+        monitored.trailing_armed = trailing_enabled and peak >= monitored.trailing_arm_price()
+        self._positions[position_id] = monitored
+        _logger.info(
+            "position_resumed",
+            position_id=position_id,
+            mint=str(token.mint),
+            symbol=token.symbol or str(token.mint)[:8],
+            entry_price=float(entry_price),
+            take_profit_pct=monitored.take_profit_pct,
+            stop_loss_pct=monitored.stop_loss_pct,
+            trailing_armed=monitored.trailing_armed,
+        )
+        return True
+
     async def _on_closed(self, event: DomainEvent) -> None:
         if not isinstance(event, PositionClosed):
             return
@@ -183,7 +246,24 @@ class PositionMonitor:
 
         prices = await self._prices({p.token for p in open_positions})
         if not prices:
+            # Silence here is indistinguishable from a quiet market: the book
+            # simply stops being marked, unrealised PnL freezes at its last
+            # value, and no stop-loss can fire — while every component still
+            # reports itself healthy. An oracle that cannot price the book is an
+            # outage in the exit path and has to say so.
+            _logger.error(
+                "position_book_unpriced",
+                positions=len(open_positions),
+                note="price oracle returned nothing — marks and exits are stalled",
+            )
             return
+        unpriced = [p for p in open_positions if str(p.token.mint) not in prices]
+        if unpriced:
+            _logger.warning(
+                "positions_unpriced",
+                count=len(unpriced),
+                mints=[str(p.token.mint) for p in unpriced[:10]],
+            )
 
         for position in open_positions:
             price = prices.get(str(position.token.mint))
