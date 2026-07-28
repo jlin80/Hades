@@ -195,7 +195,15 @@ per notification.
 
 ## Debugging "the bot isn't doing anything"
 
-In order, because each step tells you whether the next one is worth taking:
+**Start here:** `curl -s localhost:8000/api/v1/funnel | jq` (or the "Pipeline
+funnel" panel on the Portfolio page). It counts distinct mints surviving each
+hand-off over the last 24h — discovered → features → security → committee →
+risk → filled order → position — and names the stage where the count collapses.
+Every step below is the follow-up for one particular cliff; the funnel tells you
+which one you are looking at, so you do not have to walk all of them. When Risk
+is the cliff, the response's `reject_reasons` names the policy that vetoed.
+
+Then, in order, because each step tells you whether the next one is worth taking:
 
 1. `curl -s localhost:8000/health | jq '.components'` — is `worker` healthy? If it
    reads `unknown`, the pipeline is not running at all.
@@ -217,3 +225,37 @@ In order, because each step tells you whether the next one is worth taking:
    problem, not a committee problem.
 7. Trading but the balance never moves? That is the *exit* half, not the entry
    half — see "Positions are marked and exited by the Position Monitor" above.
+
+## Turning the Research Lab on
+
+Two flags, and the second is the one people miss:
+
+```
+RESEARCH_LAB_ENABLED=true      # starts the runtime
+RESEARCH_AUTO_RESEARCH=true    # schedules the recurring studies
+```
+
+With only the first, the Research screen reports **Running** and shadow
+strategies populate from the live feature stream — but nothing schedules a
+study, so Experiments, Backtests and Reports stay empty forever and the lab
+looks broken while behaving exactly as configured. The dashboard now says so
+explicitly rather than leaving you to infer it from empty tables.
+
+With both, the first pass still defers until the committee's outcome ledger
+holds `RESEARCH_MIN_SAMPLES` (default 200) labelled outcomes — logged as
+`auto_research_deferred` with the current count. On a fresh deployment that wait
+is real; lower the threshold to see the lab work sooner, accepting studies drawn
+from a thin sample.
+
+Neither flag can enable live trading. The lab reads a copy of history, holds no
+Execution/Risk/Portfolio collaborator, and its one write endpoint records a
+governance decision that deploys nothing.
+
+Apply on the server with:
+
+```bash
+docker compose up -d --build api worker
+```
+
+The lab lives in the **worker**; the `api` process only reads its Redis status
+snapshot and its Postgres tables, so restarting the API alone changes nothing.

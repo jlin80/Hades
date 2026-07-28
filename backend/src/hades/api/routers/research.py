@@ -270,6 +270,38 @@ async def promote_candidate(
     )
     if row is None:
         raise HTTPException(status_code=404, detail="candidate not found")
+
+    # The response used to claim "recorded" while writing nothing, so the
+    # Promotion decisions panel stayed empty forever and a governance decision
+    # left no trace. Persist it before saying it happened.
+    record = ResearchPromotionRecord(
+        candidate_id=candidate_id,
+        candidate_name=row.name,
+        kind="manual",
+        outcome="approved",
+        manual_approved=True,
+        rationale="Recorded from the dashboard by a human operator.",
+        payload={
+            "candidate_id": candidate_id,
+            "name": row.name,
+            "archetype": row.archetype,
+            "version": row.version,
+            "stage": row.stage,
+            "source": "dashboard",
+        },
+    )
+    if container.database is None:
+        raise HTTPException(
+            status_code=503, detail="promotion cannot be recorded: no database configured"
+        )
+    try:
+        async with container.database.session() as session:
+            session.add(record)
+    except Exception as exc:  # never claim success on a failed write
+        raise HTTPException(
+            status_code=500, detail=f"promotion could not be recorded: {exc}"
+        ) from exc
+
     return {
         "candidate_id": candidate_id,
         "name": row.name,

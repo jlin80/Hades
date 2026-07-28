@@ -146,6 +146,27 @@ export function ResearchScreen() {
         )}
       </div>
 
+      {/* A lab that is "Running" with every tab empty reads as broken, but the
+          usual cause is configuration: the runtime is up and the scheduler is
+          off, or it is on and still waiting for enough labelled outcomes to
+          study. Both are worth saying out loud rather than leaving an operator
+          to infer them from empty tables. */}
+      {status?.lab_enabled && status.running && status.live.auto_research === false && (
+        <div className="rounded-lg border border-amber-500/30 bg-amber-950/20 px-4 py-2 text-sm text-amber-200">
+          The lab runtime is up but the study scheduler is off, so no experiments,
+          backtests or reports will be produced. Shadow strategies still track the
+          live feature stream. Set <code className="font-mono">RESEARCH_AUTO_RESEARCH=true</code>{" "}
+          to enable recurring studies.
+        </div>
+      )}
+
+      {status?.lab_enabled && status.live.auto_research === true && (
+        <div className="text-xs text-hades-muted">
+          Studies draw on {status.live.historical_samples ?? 0} labelled outcome(s); passes
+          defer until the configured minimum is reached.
+        </div>
+      )}
+
       <div className="grid gap-4 sm:grid-cols-3 lg:grid-cols-5">
         <Stat label="Experiments" value={status?.experiments_total ?? 0} />
         <Stat label="Backtests" value={status?.backtests_total ?? 0} />
