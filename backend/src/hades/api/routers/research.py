@@ -42,11 +42,35 @@ async def research_status(container: Container = Depends(get_container)) -> dict
     live = await _live_status(container)
     counts = await _counts(container)
     return {
-        "lab_enabled": container.settings.research.lab_enabled,
+        "lab_enabled": _lab_enabled(container, live),
         "running": live is not None,
         **counts,
         "live": live or {},
     }
+
+
+def _lab_enabled(container: Container, live: dict[str, Any] | None) -> bool:
+    """Whether the lab is enabled, according to the process that would host it.
+
+    The Worker hosts the lab; the API only reports on it. Both load ``.env``
+    independently, so reading this from the API's own settings describes the API
+    container's configuration rather than the lab's. Enabling
+    ``RESEARCH_LAB_ENABLED`` and restarting only the Worker then produced a
+    response that contradicted itself — ``lab_enabled: false`` beside
+    ``running: true`` and a ``live`` payload full of shadow strategies — and the
+    dashboard faithfully rendered "Disabled" over a lab that was demonstrably
+    working.
+
+    The snapshot carries the Worker's own view, so prefer it whenever the Worker
+    is reporting. Fall back to local settings only when there is no snapshot,
+    where it is the sole evidence available and answers the question an operator
+    is really asking: is this switched on at all?
+    """
+    if live is not None:
+        reported = live.get("lab_enabled")
+        if isinstance(reported, bool):
+            return reported
+    return bool(container.settings.research.lab_enabled)
 
 
 @router.get("/experiments", summary="Recent experiments")
