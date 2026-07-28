@@ -139,6 +139,56 @@ export interface EquityPoint {
   equity_usd: number;
 }
 
+// --- Risk: the defence layer -------------------------------------------------
+
+export interface RiskLive {
+  enabled?: boolean;
+  kill_switch_level?: number;
+  kill_switch_label?: string;
+  kill_switch_reason?: string;
+  circuit_breaker_open?: boolean;
+  circuit_breaker_reasons?: string[];
+  emergency_mode?: boolean;
+  open_positions?: number;
+  portfolio_exposure_pct?: number;
+  daily_loss_pct?: number;
+  drawdown_pct?: number;
+  consecutive_losses?: number;
+  [key: string]: unknown;
+}
+
+export interface RiskStatus {
+  enabled: boolean;
+  running: boolean;
+  approvals_total: number;
+  rejections_total: number;
+  live: RiskLive;
+}
+
+export interface DrawdownState {
+  drawdown_pct: number;
+  daily_loss_pct: number;
+  limits: Record<string, number>;
+}
+
+export interface ExposureState {
+  portfolio_exposure_pct: number;
+  open_positions: number;
+  caps: Record<string, number>;
+}
+
+export interface RiskDecision {
+  mint: string;
+  symbol: string | null;
+  decision: string;
+  reject_reason: string | null;
+  conviction: number | null;
+  notional_usd: number | null;
+  headline: string | null;
+  strategy: string | null;
+  at: string | null;
+}
+
 /** Wallet identity and health. Never carries key material — by design. */
 export interface WalletHealth {
   configured: boolean;
@@ -557,6 +607,23 @@ export const api = {
     get<{ points: EquityPoint[] }>("/api/v1/portfolio/equity-curve?limit=200"),
   executionMetrics: () => get<ExecutionMetrics>("/api/v1/execution/metrics"),
   executionWallet: () => get<WalletHealth>("/api/v1/execution/wallet"),
+
+  // --- Risk: read the defence layer, then operate it ---
+  riskStatus: () => get<RiskStatus>("/api/v1/risk/status"),
+  riskDrawdown: () => get<DrawdownState>("/api/v1/risk/drawdown"),
+  riskExposure: () => get<ExposureState>("/api/v1/risk/exposure"),
+  riskDecisions: (limit = 25) =>
+    get<{ decisions: RiskDecision[] }>(`/api/v1/risk/decisions?limit=${limit}`),
+  // These publish a command the Worker acts on; the response confirms the
+  // command was issued, not that it has taken effect yet. The screen re-reads
+  // status afterwards so the operator sees the real state rather than a promise.
+  resetKillSwitch: () => post<{ ok: boolean }>("/api/v1/risk/kill-switch/reset"),
+  resetCircuitBreaker: () => post<{ ok: boolean }>("/api/v1/risk/circuit-breaker/reset"),
+  tripCircuitBreaker: (reason: string) =>
+    post<{ ok: boolean }>(`/api/v1/risk/circuit-breaker/trip?reason=${encodeURIComponent(reason)}`),
+  enterEmergency: (reason: string) =>
+    post<{ ok: boolean }>(`/api/v1/risk/emergency/enter?reason=${encodeURIComponent(reason)}`),
+  exitEmergency: () => post<{ ok: boolean }>("/api/v1/risk/emergency/exit"),
   intelligenceStatus: () => get<IntelligenceStatus>("/api/v1/intelligence/status"),
   walletProfile: (address: string) =>
     get<WalletProfile>(`/api/v1/intelligence/wallet/${address}`),
