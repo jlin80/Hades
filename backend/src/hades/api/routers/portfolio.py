@@ -17,11 +17,14 @@ from hades.api.dependencies import get_container
 from hades.bootstrap import Container
 from hades.ops.risk_runtime import PORTFOLIO_STATUS_NAMESPACE, STATUS_KEY
 from hades.shared_kernel.cache import CacheService
+from hades.shared_kernel.logging import describe, get_logger
 from hades.shared_kernel.persistence.models.portfolio import (
     EquityCurve,
     PnLHistory,
     PortfolioHistory,
 )
+
+_logger = get_logger("api.portfolio")
 
 router = APIRouter(prefix="/api/v1/portfolio", tags=["portfolio"])
 
@@ -147,7 +150,8 @@ async def _live(container: Container) -> dict[str, Any] | None:
     cache = CacheService(container.redis, namespace=PORTFOLIO_STATUS_NAMESPACE)
     try:
         result = await cache.get(STATUS_KEY)
-    except Exception:
+    except Exception as exc:
+        _logger.warning("api_query_failed", endpoint="_live", error=describe(exc))
         return None
     return result if isinstance(result, dict) else None
 
@@ -158,5 +162,6 @@ async def _rows(container: Container, stmt: Any) -> list[Any]:
     try:
         async with container.database.session() as session:
             return list((await session.scalars(stmt)).all())
-    except Exception:
+    except Exception as exc:
+        _logger.warning("api_query_failed", endpoint="_rows", error=describe(exc))
         return []

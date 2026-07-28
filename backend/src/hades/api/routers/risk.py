@@ -28,7 +28,10 @@ from hades.contexts.risk.domain.events import (
 from hades.ops.risk_runtime import RISK_STATUS_NAMESPACE, STATUS_KEY
 from hades.shared_kernel.cache import CacheService
 from hades.shared_kernel.domain.identifiers import new_id
+from hades.shared_kernel.logging import describe, get_logger
 from hades.shared_kernel.persistence.models.risk import RiskDecisionRecord
+
+_logger = get_logger("api.risk")
 
 router = APIRouter(prefix="/api/v1/risk", tags=["risk"])
 
@@ -182,7 +185,8 @@ async def _live(container: Container) -> dict[str, Any] | None:
     cache = CacheService(container.redis, namespace=RISK_STATUS_NAMESPACE)
     try:
         result = await cache.get(STATUS_KEY)
-    except Exception:  # dashboard must render even if Redis is down
+    except Exception as exc:  # dashboard must render even if Redis is down
+        _logger.warning("api_query_failed", endpoint="_live", error=describe(exc))
         return None
     return result if isinstance(result, dict) else None
 
@@ -209,7 +213,8 @@ async def _counts(container: Container) -> dict[str, Any]:
                 .select_from(RiskDecisionRecord)
                 .where(RiskDecisionRecord.decision == "reject")
             )
-    except Exception:
+    except Exception as exc:
+        _logger.warning("api_query_failed", endpoint="_counts", error=describe(exc))
         return empty
     return {"approvals_total": int(approvals or 0), "rejections_total": int(rejections or 0)}
 
@@ -220,7 +225,8 @@ async def _rows(container: Container, stmt: Any) -> list[Any]:
     try:
         async with container.database.session() as session:
             return list((await session.scalars(stmt)).all())
-    except Exception:
+    except Exception as exc:
+        _logger.warning("api_query_failed", endpoint="_rows", error=describe(exc))
         return []
 
 
@@ -230,7 +236,8 @@ async def _one(container: Container, stmt: Any) -> Any:
     try:
         async with container.database.session() as session:
             return await session.scalar(stmt)
-    except Exception:
+    except Exception as exc:
+        _logger.warning("api_query_failed", endpoint="_one", error=describe(exc))
         return None
 
 

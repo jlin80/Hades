@@ -20,7 +20,10 @@ from hades.api.dependencies import get_container
 from hades.bootstrap import Container
 from hades.ops.scanner_runtime import SCANNER_STATUS_KEY, SCANNER_STATUS_NAMESPACE
 from hades.shared_kernel.cache import CacheService
+from hades.shared_kernel.logging import describe, get_logger
 from hades.shared_kernel.persistence.models import DataAnomaly, Token
+
+_logger = get_logger("api.scanner")
 
 router = APIRouter(prefix="/api/v1/scanner", tags=["scanner"])
 
@@ -45,7 +48,8 @@ async def _live_status(container: Container) -> dict[str, Any] | None:
     cache = CacheService(container.redis, namespace=SCANNER_STATUS_NAMESPACE)
     try:
         result = await cache.get(SCANNER_STATUS_KEY)
-    except Exception:  # dashboard must render even if Redis is down
+    except Exception as exc:  # dashboard must render even if Redis is down
+        _logger.warning("api_query_failed", endpoint="_live_status", error=describe(exc))
         return None
     return result if isinstance(result, dict) else None
 
@@ -62,7 +66,8 @@ async def _counts(container: Container) -> dict[str, Any]:
                 select(func.count()).select_from(Token).where(Token.first_seen_at >= cutoff)
             )
             anomalies = await session.scalar(select(func.count()).select_from(DataAnomaly))
-    except Exception:  # never fail the endpoint on a DB hiccup
+    except Exception as exc:  # never fail the endpoint on a DB hiccup
+        _logger.warning("api_query_failed", endpoint="_counts", error=describe(exc))
         return empty
     return {
         "tokens_total": int(tokens_total or 0),
@@ -112,7 +117,8 @@ async def anomalies(
                     .order_by(desc(func.count()))
                 )
             ).all()
-    except Exception:
+    except Exception as exc:
+        _logger.warning("api_query_failed", endpoint="anomalies", error=describe(exc))
         return empty
 
     return {

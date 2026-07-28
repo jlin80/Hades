@@ -23,6 +23,7 @@ from hades.api.dependencies import get_container
 from hades.bootstrap import Container
 from hades.ops.research_runtime import RESEARCH_STATUS_KEY, RESEARCH_STATUS_NAMESPACE
 from hades.shared_kernel.cache import CacheService
+from hades.shared_kernel.logging import describe, get_logger
 from hades.shared_kernel.persistence.models.research import (
     ResearchBacktestRecord,
     ResearchCandidateRecord,
@@ -33,6 +34,8 @@ from hades.shared_kernel.persistence.models.research import (
     ResearchReportRecord,
     ResearchShadowRecord,
 )
+
+_logger = get_logger("api.research")
 
 router = APIRouter(prefix="/api/v1/research", tags=["research"])
 
@@ -344,7 +347,8 @@ async def _live_status(container: Container) -> dict[str, Any] | None:
     cache = CacheService(container.redis, namespace=RESEARCH_STATUS_NAMESPACE)
     try:
         result = await cache.get(RESEARCH_STATUS_KEY)
-    except Exception:  # dashboard must render even if Redis is down
+    except Exception as exc:  # dashboard must render even if Redis is down
+        _logger.warning("api_query_failed", endpoint="_live_status", error=describe(exc))
         return None
     return result if isinstance(result, dict) else None
 
@@ -376,7 +380,8 @@ async def _counts(container: Container) -> dict[str, Any]:
             knowledge_total = await session.scalar(
                 select(func.count()).select_from(ResearchKnowledgeRecord)
             )
-    except Exception:  # never fail the endpoint on a DB hiccup
+    except Exception as exc:  # never fail the endpoint on a DB hiccup
+        _logger.warning("api_query_failed", endpoint="_counts", error=describe(exc))
         return empty
     return {
         "experiments_total": int(experiments_total or 0),
@@ -393,7 +398,8 @@ async def _rows(container: Container, stmt: Any) -> list[Any]:
     try:
         async with container.database.session() as session:
             return list((await session.scalars(stmt)).all())
-    except Exception:
+    except Exception as exc:
+        _logger.warning("api_query_failed", endpoint="_rows", error=describe(exc))
         return []
 
 
@@ -403,5 +409,6 @@ async def _one(container: Container, stmt: Any) -> Any:
     try:
         async with container.database.session() as session:
             return await session.scalar(stmt)
-    except Exception:
+    except Exception as exc:
+        _logger.warning("api_query_failed", endpoint="_one", error=describe(exc))
         return None
