@@ -65,9 +65,7 @@ class ParameterOptimizer:
         trials: list[dict[str, float]] = []
 
         for _ in range(max(1, evaluations)):
-            params = {
-                key: round(rng.uniform(lo, hi), 4) for key, (lo, hi) in _SPACE.items()
-            }
+            params = {key: round(rng.uniform(lo, hi), 4) for key, (lo, hi) in _SPACE.items()}
             candidate = genome.model_copy(
                 update={
                     "take_profit": params["take_profit"],

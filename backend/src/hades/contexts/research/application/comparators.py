@@ -47,8 +47,7 @@ class StrategyComparator:
         objective: str = "expectancy",
     ) -> StrategyComparison:
         entries = tuple(
-            ComparisonEntry(label=label, metrics=metrics)
-            for label, metrics in scorecards.items()
+            ComparisonEntry(label=label, metrics=metrics) for label, metrics in scorecards.items()
         )
 
         def sort_key(entry: ComparisonEntry) -> tuple[float, float, float]:
@@ -81,15 +80,12 @@ class ModelComparator:
     ) -> ModelComparison:
         keys = set(production) | set(candidate)
         deltas = {
-            k: round(float(candidate.get(k, 0.0)) - float(production.get(k, 0.0)), 6)
-            for k in keys
+            k: round(float(candidate.get(k, 0.0)) - float(production.get(k, 0.0)), 6) for k in keys
         }
         # A candidate beats the incumbent when the headline metrics improve without
         # a worse drawdown. This is a *recommendation*, never an activation.
         improved = [
-            k
-            for k in ("auc", "roi", "sharpe", "precision", "recall")
-            if deltas.get(k, 0.0) > 0
+            k for k in ("auc", "roi", "sharpe", "precision", "recall") if deltas.get(k, 0.0) > 0
         ]
         dd_worse = deltas.get("max_drawdown", 0.0) > 0.0
         if improved and not dd_worse:

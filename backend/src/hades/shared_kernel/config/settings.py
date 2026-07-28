@@ -602,6 +602,35 @@ class LearningSettings(_Section):
     default_sample_support: float = 0.35
 
 
+class KnowledgeSettings(_Section):
+    """Knowledge — the platform's permanent, verifiable memory.
+
+    It records what every other context learns and, crucially, pairs each
+    decision with its realised outcome so the AI Committee finally has
+    ground-truth training samples. It takes no decision, sizes nothing and has no
+    concept of an order or a position.
+
+    ``feed_committee`` is the switch that closes the learning loop: with it on,
+    a completed lesson is written to the committee's outcome ledger. It defaults
+    **on** because a memory that never reaches the brain is the defect this
+    context was built to fix, and an operator who wants the memory without the
+    learning can still say so.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="KNOWLEDGE_", extra="ignore", env_file=".env")
+
+    enabled: bool = True
+    #: Forward completed lessons to the AI Committee's outcome ledger.
+    feed_committee: bool = True
+    #: Announce every accepted observation on the bus. Off: the Scanner is a
+    #: firehose and nothing subscribes, so this is thousands of messages an hour
+    #: consumed by no one.
+    announce_observations: bool = False
+    #: Retention floor for the read API's default query window, in days. The
+    #: store itself is append-only and never trimmed here.
+    default_query_days: int = 30
+
+
 class ResearchSettings(_Section):
     """Research Lab — the independent, offline R&D environment.
 
@@ -800,6 +829,7 @@ class Settings(BaseSettings):
     feature: FeatureSettings = Field(default_factory=FeatureSettings)
     learning: LearningSettings = Field(default_factory=LearningSettings)
     research: ResearchSettings = Field(default_factory=ResearchSettings)
+    knowledge: KnowledgeSettings = Field(default_factory=KnowledgeSettings)
     intelligence: IntelligenceSettings = Field(default_factory=IntelligenceSettings)
     strategy: StrategySettings = Field(default_factory=StrategySettings)
     timeouts: TimeoutSettings = Field(default_factory=TimeoutSettings)

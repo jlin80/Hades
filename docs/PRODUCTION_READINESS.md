@@ -21,10 +21,10 @@ Companion documents: the living reference [`../hades.md`](../hades.md), the arch
 | | |
 |---|---|
 | Overall posture | **READY (paper) · NOT-LIVE by construction** |
-| Backend health | **379 tests passing**, `mypy --strict` clean (407 files), `ruff` clean (0 findings), suite runs **warnings-as-errors** |
+| Backend health | **593 tests passing**, `mypy --strict` clean (433 files), `ruff` clean (0 findings), suite runs **warnings-as-errors** |
 | Trading mode | Paper only; live hard-gated (env gate × 2 + readiness checklist + explicit confirm + authenticated operator) and unbuildable (no live adapters) |
 | Deployment | Turnkey: `git clone → configure .env → docker compose up -d` (schema auto-migrated) |
-| Codebase | ~40.6k LOC · 18 bounded contexts · 57 tables / 7 migrations · React dashboard · Docker/Compose · Prometheus/Grafana |
+| Codebase | 19 bounded contexts · 60 tables / 10 migrations · React dashboard · Docker/Compose · Prometheus/Grafana |
 | Money-safety invariants | **Verified at source** (single trade authoriser, fail-closed everywhere, research structurally isolated, wallet layer never touches keys) |
 
 ## 2. Final architecture
@@ -34,10 +34,14 @@ Companion documents: the living reference [`../hades.md`](../hades.md), the arch
 - **CQRS** command/query buses; **event-driven** via an `EventBus` port with in-memory and
   **Redis Streams** transports; **ports & adapters** for every store and external service.
 - **One-way decision pipeline** — Scanner → Features → Security → Wallet Intelligence → AI
-  Committee → Scoring → Strategy → Risk → Execution → Portfolio. The AI layer *quantifies*;
-  the **Risk Manager alone decides**; the **Execution Engine alone knows the mode**.
+  Committee → Risk → Execution → Portfolio. The AI layer *quantifies*; the **Risk Manager
+  alone decides**; the **Execution Engine alone knows the mode**. (The `scoring` context and
+  the Strategy Engine are **not** in this path — see `ARCHITECTURE_AUDIT_2026-07-28.md` §8.)
 - **Research Lab is offline and structurally isolated** (AST-enforced) — it produces
   knowledge, never orders.
+- **Knowledge is the permanent memory** and closes the learning loop: it records from every
+  producer and pairs each decision with its realised outcome. It is **structurally unable to
+  act** — an AST test asserts it imports no other bounded context at all.
 
 See [`architecture.md`](architecture.md) for the flow, service, dependency and event maps.
 
@@ -127,6 +131,25 @@ clear, bounded path to live.
 | **Deploy** | `up -d` needed a manual `make migrate` | One-shot `migrate` service gates all app services — turnkey bring-up |
 | **Docs (H1)** | `DomainEvent` docstring overstated durable event-sourcing | Corrected at source to describe the in-memory store + read-model persistence |
 
+## 7a. Closed in Phase 1 — the learning loop (2026-07-28)
+
+The [architecture audit](ARCHITECTURE_AUDIT_2026-07-28.md) found that the platform could not
+learn from its own trades, and that the cause was structural rather than a matter of tuning.
+Phase 1 introduced the `knowledge` bounded context and closed it.
+
+| Was | Now |
+|---|---|
+| `KnowledgeFeedback.record_outcome()` had **zero callers** — realised trade results reached no ledger, leaving a **single-class dataset** on which `min_auc = 0.55` could never be met | A closed trade becomes a `Lesson` and lands in `committee_outcomes` at full weight |
+| Features would naturally have been read at settlement — **temporal leakage** | Features are **frozen at `TradeApproved`** and the leaking version is unwritable: settling accepts an `Outcome` and nothing else |
+| A promotion changed nothing until the worker restarted | `ModelPromoted` reloads the active committee in place |
+| `dataset_quality` / `sample_support` were constants presented as measurements | Derived from the dataset; a single-class dataset scores **0.0**, which is the truth |
+| `OrderSubmitted`/`OrderFilled`/`OrderFailed` were **never registered** on the bus, so under Redis they were discarded at the process boundary | Registered. Found by the new test that resolves every subscribed event name |
+
+**What this does *not* claim.** Cold start is now *solvable*, not solved: the loop is closed
+and proven end-to-end in tests, but the platform must still open and close real trades to
+accumulate both classes. Generating those first positives without asking the committee to
+decide before it can know is **Phase 2**, and must not be confused with lowering thresholds.
+
 ## 8. Known limitations
 
 1. **Durability is in-memory for three stores** — the event store (H1), the execution
@@ -142,6 +165,12 @@ clear, bounded path to live.
    risk to watch is unbounded growth of in-memory caches/stores under sustained load.
 6. **Single-position-per-mint, full-close accounting** — correct and documented for the
    current model; partial exits would need cost-basis tracking.
+7. **The Strategy Engine's output has no consumer** — `EnsembleSignalGenerated` is published
+   and nobody subscribes, so fifteen strategies and the whole weighting apparatus influence
+   no decision. Not a safety issue; it is dead weight presented as a pipeline stage. Connect
+   it or freeze it explicitly.
+8. **Cold start is unblocked, not resolved** — see §7a. The memory reports `is_trainable`
+   honestly, and until the platform accumulates both classes it will say `false`.
 
 ## 9. Recommendations for Hades v2 (pre-LIVE roadmap)
 

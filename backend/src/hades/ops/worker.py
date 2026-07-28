@@ -20,6 +20,7 @@ from hades.ops.audit_runtime import AuditRuntime
 from hades.ops.committee_runtime import CommitteeRuntime
 from hades.ops.execution_runtime import ExecutionRuntime
 from hades.ops.intelligence_runtime import IntelligenceRuntime
+from hades.ops.knowledge_runtime import KnowledgeRuntime
 from hades.ops.performance_runtime import PerformanceRuntime
 from hades.ops.research_runtime import ResearchRuntime
 from hades.ops.risk_runtime import RiskRuntime
@@ -46,6 +47,7 @@ class Worker(ServiceProcess):
         self._risk: RiskRuntime | None = None
         self._execution: ExecutionRuntime | None = None
         self._research: ResearchRuntime | None = None
+        self._knowledge: KnowledgeRuntime | None = None
 
     async def setup(self) -> None:
         # The Audit trail is a platform concern: subscribe it first so every
@@ -57,6 +59,18 @@ class Worker(ServiceProcess):
         # and publishes latency/throughput snapshots for the dashboard/API.
         self._performance = PerformanceRuntime(self._container)
         self._tasks.extend(await self._performance.start())
+
+        # Permanent memory is subscribed before any producer starts, so nothing
+        # the platform learns in its first seconds is lost. It records what every
+        # context observes and — the reason it exists — pairs each decision with
+        # its realised outcome, which is what gives the AI Committee ground-truth
+        # training samples. It cannot trade: it has no concept of an order, a
+        # position or a mode, and an AST test forbids it importing one.
+        if self._container.settings.knowledge.enabled:
+            self._knowledge = KnowledgeRuntime(self._container)
+            self._tasks.extend(await self._knowledge.start())
+        else:
+            self._log.info("knowledge_disabled")
 
         if self._container.settings.scanner.enabled:
             self._runtime = ScannerRuntime(self._container)
@@ -143,6 +157,7 @@ class Worker(ServiceProcess):
             risk="running" if self._risk else "off",
             execution="running" if self._execution else "off",
             research="running" if self._research else "off",
+            knowledge="running" if self._knowledge else "off",
         )
 
     async def teardown(self) -> None:
@@ -166,3 +181,5 @@ class Worker(ServiceProcess):
             await self._execution.stop()
         if self._research is not None:
             await self._research.stop()
+        if self._knowledge is not None:
+            await self._knowledge.stop()

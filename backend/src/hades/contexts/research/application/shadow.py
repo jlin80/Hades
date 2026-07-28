@@ -39,9 +39,7 @@ class ShadowStrategyRunner:
     def shadow(self) -> ShadowStrategy:
         return self._shadow
 
-    def observe(
-        self, sample: HistoricalSample, *, at: datetime | None = None
-    ) -> ShadowStrategy:
+    def observe(self, sample: HistoricalSample, *, at: datetime | None = None) -> ShadowStrategy:
         """Process one observation: maybe open a virtual trade, close matured ones.
 
         Returns the refreshed :class:`ShadowStrategy` snapshot. It never returns,

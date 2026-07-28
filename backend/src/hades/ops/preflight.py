@@ -208,8 +208,11 @@ async def _run() -> int:
         report = await validator.validate()
         for check in report.checks:
             _logger.info(
-                "preflight_check", name=check.name, ok=check.ok,
-                required=check.required, detail=check.detail,
+                "preflight_check",
+                name=check.name,
+                ok=check.ok,
+                required=check.required,
+                detail=check.detail,
             )
         await validator.notify(report)
         _logger.info("preflight_complete", ok=report.ok, required_failed=report.required_failed)

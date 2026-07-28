@@ -81,9 +81,7 @@ class MonteCarloEngine:
         # Composite robustness: likely to profit, shallow tail loss, low dispersion.
         p05 = _percentile(total_returns, 0.05)
         robustness = clamp01(
-            0.5 * prob_profit
-            + 0.3 * clamp01(1.0 + min(0.0, p05))
-            + 0.2 * clamp01(1.0 - worst_dd)
+            0.5 * prob_profit + 0.3 * clamp01(1.0 + min(0.0, p05)) + 0.2 * clamp01(1.0 - worst_dd)
         )
         return MonteCarloResult(
             strategy=strategy,

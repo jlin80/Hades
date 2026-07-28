@@ -16,7 +16,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from hades.contexts.execution.domain.events import TradingModeChanged
+from hades.contexts.execution.domain.events import (
+    OrderFailed,
+    OrderFilled,
+    OrderSubmitted,
+    TradingModeChanged,
+)
 from hades.contexts.features.domain.events import FeaturesComputed
 from hades.contexts.intelligence.domain.events import (
     BehaviorChanged,
@@ -28,6 +33,12 @@ from hades.contexts.intelligence.domain.events import (
     WalletRegistered,
     WalletScoreUpdated,
     WalletUpdated,
+)
+from hades.contexts.knowledge.domain.events import (
+    DecisionRecorded,
+    KnowledgeRecorded,
+    KnowledgeRejected,
+    LessonLearned,
 )
 from hades.contexts.learning.domain.events import (
     CommitteeFinished,
@@ -178,6 +189,16 @@ def _build_registry() -> EventRegistry:
         HealthRecovered,
         ComponentHeartbeat,
         TradingModeChanged,
+        # Execution Engine order lifecycle. These were published from the day the
+        # engine shipped but never registered here, so under the Redis transport
+        # they were dropped at the process boundary — `EventRegistry.rebuild`
+        # returns None for an unknown type and the bus discards it. It went
+        # unnoticed because their only consumers happened to live in the same
+        # process; anything subscribing from another service (the Knowledge
+        # memory now does) would simply never have heard a fill.
+        OrderSubmitted,
+        OrderFilled,
+        OrderFailed,
         # Scanner / data-acquisition events.
         TokenDiscovered,
         PoolDiscovered,
@@ -206,6 +227,14 @@ def _build_registry() -> EventRegistry:
         FundingRelationshipFound,
         ClusterCreated,
         WalletIntelligenceComputed,
+        # Knowledge events (permanent memory; never a trade instruction).
+        # LessonLearned crosses the transport because the AI Committee consumes
+        # it to write ground truth into its outcome ledger — the return leg of
+        # the learning loop, which must survive a multi-process deployment.
+        KnowledgeRecorded,
+        KnowledgeRejected,
+        DecisionRecorded,
+        LessonLearned,
         # AI Committee (Learning) events.
         InferenceCompleted,
         ConfidenceCalculated,

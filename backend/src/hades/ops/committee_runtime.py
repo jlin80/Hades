@@ -28,6 +28,7 @@ from hades.contexts.features.infrastructure.feature_store import (
     InMemoryFeatureStore,
     PostgresFeatureStore,
 )
+from hades.contexts.knowledge.domain.events import LessonLearned
 from hades.contexts.learning.application.committee.factory import (
     committee_from_cards,
     default_committee,
@@ -48,8 +49,8 @@ from hades.contexts.learning.application.registry import ModelRegistryService
 from hades.contexts.learning.application.subscriber import CommitteeHandler
 from hades.contexts.learning.application.training import TrainingEngine
 from hades.contexts.learning.application.validation import ValidationEngine
-from hades.contexts.learning.domain.events import CommitteePredictionGenerated
-from hades.contexts.learning.domain.models import META_MODEL_NAME
+from hades.contexts.learning.domain.events import CommitteePredictionGenerated, ModelPromoted
+from hades.contexts.learning.domain.models import META_MODEL_NAME, Dataset
 from hades.contexts.learning.domain.ports import (
     DatasetStore,
     ModelRegistry,
@@ -108,6 +109,7 @@ class CommitteeRuntime:
             self._outcome_store, self._feature_store, self._normalizer
         )
         self._predictions_session = 0
+        self._lessons_session = 0
         self._last: dict[str, Any] = {}
         self._register()
 
@@ -164,6 +166,58 @@ class CommitteeRuntime:
         CommitteeHandler(self._manager, builder).register(self._c.event_bus)
         self._feedback.register(self._c.event_bus)
         self._c.event_bus.subscribe(CommitteePredictionGenerated.__name__, self._on_prediction)
+        # The learning loop's return leg. Knowledge does the joining (a decision's
+        # frozen evidence + its realised outcome); this is where ground truth
+        # finally reaches the ledger the Dataset Builder reads.
+        if self._c.settings.knowledge.feed_committee:
+            self._c.event_bus.subscribe(LessonLearned.__name__, self._on_lesson)
+        # A promotion that the runtime never notices is a promotion that did not
+        # happen. ``set_active`` used to run only at startup, so a promoted model
+        # changed nothing until the worker was restarted — the human-gated
+        # promotion machinery worked perfectly and had no effect.
+        self._c.event_bus.subscribe(ModelPromoted.__name__, self._on_model_promoted)
+
+    async def _on_lesson(self, event: DomainEvent) -> None:
+        """Write a completed lesson into the outcome ledger.
+
+        The features come from the lesson, never from a fresh feature-store
+        lookup: they were captured at decision time, and re-reading them now
+        would label this trade with the state of the world at the moment it was
+        sold — leakage that produces excellent metrics and a useless model.
+        """
+        if not isinstance(event, LessonLearned):
+            return
+        lesson = event.lesson
+        try:
+            await self._feedback.record_outcome(
+                token_mint=lesson.subject,
+                features=dict(lesson.features),
+                realized_roi=lesson.realized_roi,
+                hit_tp=lesson.label_hit_tp,
+                hit_sl=lesson.label_hit_sl,
+                at=lesson.decided_at,
+            )
+            self._lessons_session += 1
+            _logger.info(
+                "outcome_recorded",
+                mint=lesson.subject,
+                realized_roi=round(lesson.realized_roi, 6),
+                positive=lesson.label_roi_positive,
+                features=len(lesson.features),
+            )
+        except Exception as exc:  # one lesson must never break the bus
+            self._metrics.errors.inc()
+            _logger.warning("outcome_record_failed", mint=lesson.subject, error=str(exc))
+
+    async def _on_model_promoted(self, event: DomainEvent) -> None:
+        """Reload the active committee in place after a promotion."""
+        if not isinstance(event, ModelPromoted):
+            return
+        try:
+            await self._load_active_committee()
+        except Exception as exc:  # a failed reload must not break the bus
+            self._metrics.errors.inc()
+            _logger.warning("committee_reload_failed", error=str(exc))
 
     # -- loading the active committee from the registry -----------------------
 
@@ -190,6 +244,7 @@ class CommitteeRuntime:
             return
         dataset = await self._dataset_builder.build()
         await self._dataset_store.save(dataset)
+        self._refresh_quality(dataset)
         version = await self._registry.next_version(META_MODEL_NAME)
         result = self._training.train(dataset, version=version)
         self._metrics.training_runs.inc()
@@ -203,6 +258,37 @@ class CommitteeRuntime:
             if report.passed:
                 await self._registry_service.propose_promotion(card, report)
         _logger.info("training_pass_complete", candidates=len(result.cards), version=version)
+
+    def _refresh_quality(self, dataset: Dataset) -> None:
+        """Replace the configured priors with what the data actually says.
+
+        ``dataset_quality`` and ``sample_support`` were read once from settings
+        and never recomputed, so two numbers presented to the confidence engine
+        as *measurements* were in fact constants — 0.5 and 0.35 forever, however
+        much or little the platform had learned. The committee's confidence was
+        therefore partly a reflection of a config file.
+
+        Both are now derived. Support saturates at ``min_outcomes_to_train``:
+        below it the platform genuinely does not have enough history, and saying
+        so is the honest input to a confidence calculation. Quality is the
+        balance of the labels — a dataset that is 99% one class supports very
+        little regardless of its size, which is precisely the state this platform
+        sat in while reporting healthy priors.
+        """
+        target = max(1, self._c.settings.learning.min_outcomes_to_train)
+        support = min(1.0, dataset.size / target)
+        positive_rate = dataset.positive_rate
+        # Balance peaks at 1.0 for a 50/50 split and falls to 0.0 at either
+        # extreme; a single-class dataset scores 0, which is the truth.
+        balance = max(0.0, 1.0 - abs(0.5 - positive_rate) * 2.0)
+        self._manager.set_quality(QualitySignals(dataset_quality=balance, sample_support=support))
+        _logger.info(
+            "quality_signals_refreshed",
+            samples=dataset.size,
+            positive_rate=round(positive_rate, 4),
+            dataset_quality=round(balance, 4),
+            sample_support=round(support, 4),
+        )
 
     async def _training_loop(self) -> None:
         interval = max(1, self._c.settings.learning.retrain_interval_hours) * 3600
@@ -242,6 +328,9 @@ class CommitteeRuntime:
             "shadow_enabled": self._c.settings.learning.shadow_enabled,
             "auto_train": self._c.settings.learning.auto_train,
             "predictions_session": self._predictions_session,
+            # Ground-truth samples that reached the ledger this session. Zero
+            # while trades are closing means the learning loop is open again.
+            "lessons_session": self._lessons_session,
             "last_prediction": self._last,
             "updated_at": time.time(),
         }

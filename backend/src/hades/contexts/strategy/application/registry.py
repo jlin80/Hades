@@ -30,9 +30,7 @@ class StrategyRegistry:
     def register(self, strategy: BaseStrategy) -> None:
         self._strategies[strategy.name] = strategy
         self._errors.setdefault(strategy.name, 0)
-        self._weights.setdefault(
-            strategy.name, StrategyWeight(strategy=strategy.name, weight=1.0)
-        )
+        self._weights.setdefault(strategy.name, StrategyWeight(strategy=strategy.name, weight=1.0))
 
     def register_many(self, strategies: Iterable[BaseStrategy]) -> None:
         for strategy in strategies:

@@ -423,9 +423,7 @@ class PromotionDecision(ValueObject):
         """A candidate is promotable only when it cleared the bar AND a human
         approved it. The lab can never satisfy the second half by itself."""
         return (
-            self.outcome is PromotionOutcome.APPROVED
-            and self.manual_approved
-            and not self.failed
+            self.outcome is PromotionOutcome.APPROVED and self.manual_approved and not self.failed
         )
 
 

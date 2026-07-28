@@ -151,9 +151,7 @@ def _maybe_build_live(
         return None
     assert signer is not None and quote_provider is not None and rpc is not None
     e = settings.execution
-    swap = SwapManager(
-        quote_provider, quote_mint=e.quote_mint, sol_price_usd=e.sol_price_usd
-    )
+    swap = SwapManager(quote_provider, quote_mint=e.quote_mint, sol_price_usd=e.sol_price_usd)
     confirmation = ConfirmationEngine(
         rpc,
         timeout_seconds=e.confirmation_timeout_seconds,

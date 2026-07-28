@@ -24,6 +24,11 @@ from hades.shared_kernel.persistence.models.intelligence import (
     WalletRelationshipRecord,
     WalletTimelineRecord,
 )
+from hades.shared_kernel.persistence.models.knowledge import (
+    KnowledgeDecisionRecord,
+    KnowledgeLessonRecord,
+    KnowledgeObservationRecord,
+)
 from hades.shared_kernel.persistence.models.learning import (
     CommitteeDatasetRecord,
     CommitteeDriftRecord,
@@ -107,6 +112,9 @@ __all__ = [
     "Feature",
     "HealthCheck",
     "IntelClusterRecord",
+    "KnowledgeDecisionRecord",
+    "KnowledgeLessonRecord",
+    "KnowledgeObservationRecord",
     "LiveTrade",
     "MarketData",
     "Model",

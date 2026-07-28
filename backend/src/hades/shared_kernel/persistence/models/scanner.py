@@ -81,9 +81,7 @@ class DataAnomaly(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     field: Mapped[str] = mapped_column(String(120), nullable=False)
     detail: Mapped[str] = mapped_column(Text, nullable=False)
     occurrences: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
-    first_detected_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False
-    )
+    first_detected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     detected_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), index=True, nullable=False
     )

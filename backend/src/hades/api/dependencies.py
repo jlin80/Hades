@@ -47,9 +47,7 @@ def get_config_manager(container: Container = Depends(get_container)) -> ConfigM
         snapshots = InMemoryConfigSnapshotStore()
         runtime = InMemoryRuntimeConfigStore()
         audit = AuditRecorder(InMemoryAuditStore())
-    return ConfigManager(
-        container.settings, snapshots=snapshots, runtime=runtime, audit=audit
-    )
+    return ConfigManager(container.settings, snapshots=snapshots, runtime=runtime, audit=audit)
 
 
 def get_trading_mode_service(

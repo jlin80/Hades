@@ -99,9 +99,9 @@ async def funnel(
                 )
             )
             filled = await session.scalar(
-                select(func.count()).select_from(Trade).where(
-                    Trade.filled_at >= since, Trade.status == "filled"
-                )
+                select(func.count())
+                .select_from(Trade)
+                .where(Trade.filled_at >= since, Trade.status == "filled")
             )
             opened = await session.scalar(
                 select(func.count()).select_from(Position).where(Position.opened_at >= since)
@@ -149,9 +149,7 @@ def _stage(key: str, label: str, count: Any) -> dict[str, Any]:
     return {"key": key, "label": label, "count": int(count or 0)}
 
 
-def _diagnose(
-    stages: list[dict[str, Any]], reject_reasons: dict[str, int], open_now: int
-) -> str:
+def _diagnose(stages: list[dict[str, Any]], reject_reasons: dict[str, int], open_now: int) -> str:
     """Name the first stage that lost everything — the actionable sentence.
 
     The funnel's numbers already contain the answer, but reading a cliff off nine
@@ -160,8 +158,7 @@ def _diagnose(
     counts = {s["key"]: s["count"] for s in stages}
     if counts["discovered"] == 0:
         return (
-            "Nothing was discovered in this window — the Scanner's sources are "
-            "the place to look."
+            "Nothing was discovered in this window — the Scanner's sources are the place to look."
         )
     if counts["positions_opened"] > 0:
         return (

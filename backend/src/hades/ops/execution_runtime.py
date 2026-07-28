@@ -60,11 +60,7 @@ class ExecutionRuntime:
         self._metrics = ExecutionMetrics(container.metrics)
         self._cache = CacheService(container.redis, namespace=EXECUTION_STATUS_NAMESPACE)
 
-        repo = (
-            TradingModeRepository(container.database)
-            if container.database is not None
-            else None
-        )
+        repo = TradingModeRepository(container.database) if container.database is not None else None
         self._mode_service = TradingModeService(
             container.settings,
             event_bus=container.event_bus,

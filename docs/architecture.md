@@ -12,11 +12,14 @@ event map — plus the Architecture Decision Records. Everything here is traced 
 Data flows one way. The AI layer only ever produces probabilities; **only the Risk Manager
 authorises a trade**, and only the Execution Engine knows paper vs. live.
 
-> **This diagram was corrected on 2026-07-28.** It previously showed a
-> `Committee → Scoring → Strategy → Risk` chain that the code does not execute: the `scoring`
-> context has no wiring at all, and the Strategy Engine runs *in parallel* with Risk rather
-> than upstream of it. Dashed red edges below are **breaks in the graph** — a producer with no
-> consumer. See [`ARCHITECTURE_AUDIT_2026-07-28.md`](ARCHITECTURE_AUDIT_2026-07-28.md) §8.
+> **Corrected 2026-07-28.** This diagram previously showed a `Committee → Scoring → Strategy
+> → Risk` chain the code does not execute: the `scoring` context has no wiring at all, and
+> the Strategy Engine runs *in parallel* with Risk rather than upstream of it. See
+> [`ARCHITECTURE_AUDIT_2026-07-28.md`](ARCHITECTURE_AUDIT_2026-07-28.md) §8.
+>
+> **Updated 2026-07-28 (Phase 1).** The **learning loop is now closed** through the new
+> `knowledge` context (green). Dashed red edges are still **breaks in the graph** — a
+> producer with no consumer.
 
 ```mermaid
 flowchart TD
@@ -33,14 +36,20 @@ flowchart TD
     PF -->|PositionUpdated / PositionClosed| PM[Position Monitor]
     PM -->|SELL on TP/SL/trailing| EX
 
-    SE -.->|TokenRejected| KF[Knowledge Feedback]
-    KF -->|weak negative samples| OS[(OutcomeStore)]
-    PF -.->|realised labels| GAP2[["✗ record_outcome has no caller"]]:::broken
-
     SE & WI -->|facts| FC[EventDrivenRiskFacts] --> RK
+
+    KN[["knowledge — permanent memory"]]:::memory
+    FE & SE & WI & AI -.->|observations| KN
+    RK -.->|TradeApproved: FREEZE features| KN
+    PF -.->|PositionOpened / PositionClosed| KN
+    KN ==>|LessonLearned| KF[Knowledge Feedback]
+    KF ==>|ground-truth samples| OS[(committee_outcomes)]
+    SE -.->|TokenRejected| KF
+    OS --> TR[Training + Validation] -->|ModelPromoted| AI
 
     classDef quantify fill:#eef,stroke:#88a;
     classDef decide fill:#fee,stroke:#a88;
+    classDef memory fill:#efe,stroke:#3a3,stroke-width:2px;
     classDef broken fill:#fdd,stroke:#c00,stroke-width:2px,stroke-dasharray: 4 4;
     class SC,FE,SE,WI,AI,ST quantify;
     class RK,EX decide;
@@ -49,9 +58,25 @@ flowchart TD
 - **Quantify (blue):** Scanner → … → AI Committee. Produce evidence; never decide.
 - **Decide (red):** Risk Manager (sole trade authoriser) → Execution Engine (sole
   mode-aware component).
-- **Broken (dashed red):** the Strategy Engine's ensemble output and the realised-outcome
-  write-path back into the AI Committee. Both are implemented, tested and unreachable. The
-  second one is why the platform cannot learn.
+- **Remember (green):** Knowledge. Records from every producer; joins each decision with its
+  realised outcome; **cannot act** — see §3a.
+- **Broken (dashed red):** the Strategy Engine's ensemble output still has no consumer.
+
+### The learning loop (closed in Phase 1)
+
+The thick edges above are the loop that did not exist. Its two hard rules:
+
+1. **Features are frozen at `TradeApproved`, never read at `PositionClosed`.** Reading them
+   at settlement labels the state of the world at the moment of *sale* with the result of the
+   trade — temporal leakage, which yields excellent offline metrics and a model that cannot
+   work. Pinned by `tests/test_knowledge_loop.py::test_the_lesson_uses_features_from_entry_not_from_exit`.
+2. **A decision settles exactly once.** The bus is at-least-once; a redelivered close must
+   produce nothing, not a second copy of the lesson silently doubling that trade's weight in
+   every future dataset. Enforced by the journal's take-once semantics *and* a unique
+   constraint on `knowledge_lessons.ref`.
+
+`ModelPromoted` now closes the deployment half too: the committee reloads its active models
+in place, where previously a promotion changed nothing until the worker was restarted.
 
 ### Contexts with no wiring
 
@@ -106,7 +131,7 @@ the **api**; Discord delivery in **notification**; periodic jobs (backups, clean
 ## 3. Context dependency & isolation map
 
 Contexts never import each other's internals — they communicate through domain events on
-the bus. Two isolation rules are **structurally enforced by tests**:
+the bus. Three isolation rules are **structurally enforced by tests**:
 
 ```mermaid
 flowchart TD
@@ -117,6 +142,9 @@ flowchart TD
     RES[research] -. reads read-only .-> LEDGER[(committee_outcomes ledger)]
     RES == AST-blocked ==x EXEC[execution / risk / portfolio]
 
+    KN[knowledge] == AST-blocked ==x ANY[every other bounded context]
+    KN --> SK
+
     ALL[every context] --> SK
     NOTIF[notification] -. consumes NotificationRequested .- ALL
     AUDIT[audit] -. subscribes to promotions / risk-control / kill-switch events .- ALL
@@ -126,6 +154,20 @@ flowchart TD
   file under `contexts/research` and fails the build if it imports `execution`, `risk` or
   `portfolio`; it also asserts promotion payloads carry no order/size and require
   `manual_approved`.
+- **Knowledge isolation (verified, stricter):** `tests/test_knowledge_isolation.py` asserts
+  `contexts/knowledge` imports **no other bounded context at all** — an allowlist rather than
+  a blocklist, so a context added next year is covered without anyone remembering to add it.
+  It also checks that `ops/knowledge_runtime` does not reintroduce the coupling, and that
+  every event name that runtime subscribes to still resolves to a real event class.
+
+  Knowledge is wired into every producer on the platform; that is only safe because it cannot
+  act. It has no concept of an order, a position or a trading mode, and it hears about the
+  world through one self-owned inbound type (`KnowledgeEnvelope`) that the composition root
+  translates into. There is nothing to import, so there is no import to abuse.
+
+  The event-name check found a real pre-existing defect on its first run: `OrderSubmitted` /
+  `OrderFilled` / `OrderFailed` had never been registered in `bootstrap._build_registry`, so
+  under the Redis transport they were silently discarded at every process boundary.
 - **Single trade authoriser (verified):** `TradeApproved` is constructed in exactly one
   place — `risk/application/manager.py`.
 
@@ -148,6 +190,7 @@ idempotent).
 | **risk** | `TradeApproved`, `TradeRejected`, `RiskReduced`, `KillSwitch*`, `CircuitBreaker*`, `EmergencyMode*`, `Drawdown/ExposureLimitBreached`, `RiskControlCommandIssued` | Execution, Portfolio, Audit, Notification |
 | **execution** | `OrderSubmitted`, `OrderFilled`, `OrderFailed`, `TradingModeChanged` | Portfolio, Notification, Audit |
 | **portfolio** | `PositionOpened`, `PositionUpdated`, `TrailingStopAdjusted`, `PositionClosed`, `CapitalCommitted`/`Released`, `PortfolioUpdated` | Risk Manager, Monitoring, Notification |
+| **knowledge** | `KnowledgeRecorded`, `KnowledgeRejected`, `DecisionRecorded`, **`LessonLearned`** | AI Committee (`LessonLearned` → `committee_outcomes`) |
 | **notification** | `NotificationRequested` (consumed only by the Notification Service) | Notification Service → Discord |
 
 Cross-cutting consumers: **Audit** records promotions, weight changes, kill-switch /

@@ -76,9 +76,7 @@ _KNOWN_FIELDS: Final[tuple[tuple[str, str, bool], ...]] = (
 )
 
 # Tags that are metadata for the builder itself, not fields to render as columns.
-_META_TAGS: Final[frozenset[str]] = frozenset(
-    {"category", "timestamp", "host", "container"}
-)
+_META_TAGS: Final[frozenset[str]] = frozenset({"category", "timestamp", "host", "container"})
 
 
 class EmbedBuilder:

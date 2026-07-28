@@ -80,11 +80,7 @@ async def performance(container: Container = Depends(get_container)) -> dict[str
 @router.get("/shadow", summary="Strategies currently running in shadow (pre-production)")
 async def shadow(container: Container = Depends(get_container)) -> dict[str, Any]:
     live = await _live(container) or {}
-    rows = [
-        s
-        for s in live.get("strategies", [])
-        if isinstance(s, dict) and s.get("shadow")
-    ]
+    rows = [s for s in live.get("strategies", []) if isinstance(s, dict) and s.get("shadow")]
     return {"shadow": rows}
 
 

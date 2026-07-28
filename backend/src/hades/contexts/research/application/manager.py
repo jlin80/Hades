@@ -236,9 +236,7 @@ class ResearchManager:
         validation: Sequence[HistoricalSample],
         forward: Sequence[HistoricalSample],
     ) -> ValidationReport:
-        return self._validation.run(
-            candidate, train=train, validation=validation, forward=forward
-        )
+        return self._validation.run(candidate, train=train, validation=validation, forward=forward)
 
     async def evaluate_promotion(
         self,
@@ -335,9 +333,7 @@ class ResearchManager:
         except Exception as exc:  # the lab must never disrupt the bus
             _logger.warning("research_publish_failed", error=str(exc))
 
-    async def _notify(
-        self, *, title: str, body: str, severity: Severity = Severity.INFO
-    ) -> None:
+    async def _notify(self, *, title: str, body: str, severity: Severity = Severity.INFO) -> None:
         try:
             await self._notifier.notify(
                 title=title, body=body, severity=severity, tags={"context": "research"}

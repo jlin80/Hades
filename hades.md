@@ -17,37 +17,35 @@
 | **Current phase** | **Phase 11 — Production Hardening, Stage 2 (final code-quality & deployment closure)** |
 | **Version** | `0.10.0` |
 | **Trading** | Paper only. Live execution is hard-gated OFF (two switches), blocked by the Production Checklist (any failing required subsystem or an active Emergency Mode refuses the switch to LIVE), **and** — as of Stage 2 — the switch to LIVE additionally requires an authenticated operator (never the implicit `system` principal). The Execution Engine remains the *only* component that knows the mode; everything upstream is mode-agnostic. |
-| **Backend tests** | **378 passing** · `mypy --strict` clean (407 src files) · **`ruff` clean (0 findings)** · suite runs **warnings-as-errors** |
+| **Backend tests** | **593 passing** · `mypy --strict` clean (433 src files) · **`ruff` clean (0 findings)** · suite runs **warnings-as-errors** |
 | **Deployment** | `docker compose up -d` is now a complete, no-manual-steps bring-up: a one-shot `migrate` service applies the schema to head before any app service starts. |
 
 > **⚠️ Architecture audit, 2026-07-28 — read before planning any new capability.**
 > A full audit of the backend and of `HadesResearchLab` is recorded in
-> [`docs/ARCHITECTURE_AUDIT_2026-07-28.md`](docs/ARCHITECTURE_AUDIT_2026-07-28.md).
-> It found the code sound and the **event graph incomplete**: three open circuits mean
-> the platform cannot learn from its own trades, no matter how it is configured.
+> [`docs/ARCHITECTURE_AUDIT_2026-07-28.md`](docs/ARCHITECTURE_AUDIT_2026-07-28.md). It found
+> the code sound and the **event graph incomplete**: three open circuits meant the platform
+> could not learn from its own trades, no matter how it was configured.
 >
-> - **The learning loop has no write path.** `KnowledgeFeedback.record_outcome()` — the
->   method that turns a closed trade into a training sample — has **zero callers**. The
->   outcome ledger therefore holds only weak negatives from `TokenRejected`: a
->   **single-class dataset**, on which `ValidationEngine.min_auc = 0.55` can never be met.
->   No candidate model can ever be validated, so the committee is permanently pinned to its
->   default priors. **This, not the 0.4626 vs. 0.55 threshold, is the real cold-start lock.**
-> - **The Strategy Engine has no consumer.** `EnsembleSignalGenerated` is published and
+> **Two of the three are closed by Phase 1 (§6m).** What remains open:
+>
+> - **The Strategy Engine still has no consumer.** `EnsembleSignalGenerated` is published and
 >   nobody subscribes. All fifteen strategies, the weighted ensemble and the dynamic weight
->   engine influence nothing. Risk consumes `CommitteePredictionGenerated` directly.
->   `strategy.gate_risk` is read only for logs.
-> - **A model promotion does not reach the runtime** until the worker restarts —
->   `set_active()` is called only at startup and nothing subscribes to `ModelPromoted`.
+>   engine influence nothing; Risk consumes `CommitteePredictionGenerated` directly, and
+>   `strategy.gate_risk` is read only for logs. **Decision pending: connect or freeze.**
+> - `contexts/scoring` and `contexts/wallet` have **no wiring anywhere** (§4's context list
+>   describes them as pipeline stages — they are not).
+> - The whole pipeline runs in the single `worker` process while `engine` sits idle.
+> - The Research Lab bridge is incompatible on format, model family *and* feature space at
+>   once — see [`docs/RESEARCH_LAB_BRIDGE.md`](docs/RESEARCH_LAB_BRIDGE.md). **Decision
+>   pending.**
+> - The event store is still in-memory (H1), so incidents remain hard to reconstruct.
 >
-> Also: `contexts/scoring` and `contexts/wallet` have **no wiring anywhere** (§6d/§6i and the
-> §4 context list describe them as pipeline stages — they are not); the whole pipeline runs
-> in the single `worker` process while `engine` sits idle; and the Research Lab bridge is
-> incompatible on format, model family *and* feature space at once (see
-> [`docs/RESEARCH_LAB_BRIDGE.md`](docs/RESEARCH_LAB_BRIDGE.md)).
+> Closed in Phase 1 (§6m): the learning loop's write path, and promotions taking effect
+> without a restart.
 >
-> The audit's phase plan is ordered so that **the learning loop is closed before any
-> threshold is recalibrated** — lowering thresholds first would produce trades whose results
-> still never reach the ledger, hiding the defect behind apparent activity.
+> **The ordering rule still holds: do not recalibrate thresholds before the platform is
+> demonstrably learning.** Lowering them earlier would have produced trades whose results
+> reached nothing, hiding the defect behind apparent activity.
 
 Phase 1 established the architecture skeleton (bounded contexts, contracts,
 domain events, shared kernel). Phase 2 built the full platform the system runs on
@@ -249,6 +247,7 @@ research, notification, monitoring observe the whole flow.
 | **execution** | **The only paper↔live seam.** One `Executor` port, two adapters. | `OrderSubmitted/Filled/Failed` | `Executor`, `TransactionSigner` |
 | **learning** | Build datasets from history, retrain/evaluate, **propose** (never auto-promote). | `ModelTrained`, `ModelPromotionProposed` | `TrainingDataAssembler`, `ModelTrainer`, `ModelPublisher` |
 | **research** | Offline R&D on **copied** data. **No path to execution.** Human-gated promotion. | `ExperimentCompleted`, `CandidateProposed` | `ExperimentRunner`, `HistoricalDataReader` |
+| **knowledge** | **Permanent, verifiable memory.** Records from every producer; joins each decision with its realised outcome. **Cannot act** — imports no other context (§6m). | `KnowledgeRecorded`, `DecisionRecorded`, `LessonLearned` | `KnowledgeStore`, `LessonStore`, `DecisionJournalStore` |
 | **notification** | Outward alerts, severity-gated, transport-agnostic (Discord first). | — | `Notifier` |
 | **monitoring** | Watchdog (heartbeats) + Health Monitor (dependency probes → `/health`). | `ComponentHeartbeat`, `HealthDegraded/Recovered` | `HealthProbe`, `HeartbeatSink` |
 
@@ -1523,6 +1522,127 @@ items are large, are *not* blockers for the paper-only posture, and — critical
 
 ---
 
+## 6m. Knowledge — permanent memory, and the end of cold start (Phase 1, 2026-07-28)
+
+The [architecture audit](docs/ARCHITECTURE_AUDIT_2026-07-28.md) found that Hades could not
+learn, and that the cause was not a threshold. `KnowledgeFeedback.record_outcome()` — the
+method that turns a closed trade into a training sample — had **no callers**. Every trade the
+platform ran produced its single most expensive datum, the realised result, and threw it away.
+The outcome ledger therefore held only weak negatives from `TokenRejected`: a **single-class
+dataset**, on which AUC is undefined, so `ValidationEngine.min_auc = 0.55` could never be met,
+so no candidate was ever validated, so the committee stayed on its default priors and
+`P(ROI+)` sat at 0.4626 against a 0.55 minimum. Lowering that minimum would have produced
+trades whose outcomes still reached nothing — activity that looks like progress and teaches
+the system nothing.
+
+Phase 1 closes the loop by introducing a new bounded context.
+
+### What Knowledge is
+
+An **append-only store of verifiable facts**, fed by every producer on the platform, plus the
+one piece of joining logic that was missing: it remembers the evidence behind a decision and
+pairs it, later, with that decision's realised outcome.
+
+| Concept | Meaning |
+|---|---|
+| `Observation` | One immutable thing the platform knows, tagged with its `KnowledgeSource` and a `Verification` level |
+| `Decision` | The feature vector **frozen at the moment a decision was taken** |
+| `Outcome` | What actually happened to that decision |
+| `Lesson` | `Decision ⋈ Outcome` — a training sample with ground truth and no leakage |
+
+**Verification is a first-class property, not a comment.** A backtest result and a settled
+paper trade are both knowledge; only one is ground truth. `REALISED > SIMULATED > REPORTED >
+UNVERIFIED`, ordered explicitly (`VERIFICATION_RANK`) because a SQL `>=` over the labels would
+compare them alphabetically and silently return the wrong set.
+
+### What Knowledge is not
+
+It takes no decision, sizes nothing and executes nothing. It has no concept of an order, a
+position, a balance or a trading mode — and **no way to acquire one**:
+
+    It does not import execution.  It does not import portfolio.
+    It does not import risk.       It does not import learning.
+
+`tests/test_knowledge_isolation.py` AST-parses the package and fails the build on any of them.
+The check is an **allowlist**, not a blocklist: Knowledge may depend on the shared kernel and
+nothing else, so a context added next year is covered without anyone remembering to add it.
+Learning is forbidden too, and for a subtler reason — the loop runs Knowledge → Committee, so
+an import the other way would make it a cycle.
+
+### How it hears about the world without importing anything
+
+Knowledge exposes exactly one inbound shape, `KnowledgeEnvelope`. The composition root
+(`ops/knowledge_runtime.py`) translates the platform's events into it, **subscribing by event
+name rather than by class**, so the wiring does not reintroduce the coupling the context
+refuses. That trade has an obvious cost — a renamed event would stop being recorded in silence
+— and the cost is paid in the test suite instead: every subscribed name is resolved against
+the platform's event registry, so a rename breaks the build rather than production.
+
+That check earned its keep immediately: it found that `OrderSubmitted` / `OrderFilled` /
+`OrderFailed` had been published since the Execution Engine shipped and **never registered**
+on the bus. Under the Redis transport `EventRegistry.rebuild` returns `None` for an unknown
+type and the event is discarded, so those fills had never been able to cross a process
+boundary. It went unnoticed only because their consumers happened to live in the same process.
+
+### The loop
+
+```
+FeaturesComputed   → remember the current vector for this mint
+TradeApproved      → FREEZE it: this is the evidence, and it is now immutable
+PositionOpened     → the frozen evidence gets the reference its outcome will quote
+PositionClosed     → settle → Lesson → LessonLearned → committee_outcomes
+```
+
+Two rules make it correct rather than merely present:
+
+- **Freeze at approval, never read at settlement.** The obvious implementation — wait for the
+  close, then ask the feature store what the token looks like — trains on the state of the
+  world at the moment of *sale*, labelled with the result of the trade. The design makes the
+  leaking version unwritable: settling takes an `Outcome` and nothing else, so there is no
+  feature store to consult. Pinned by
+  `test_the_lesson_uses_features_from_entry_not_from_exit`.
+- **Settle exactly once.** Delivery is at-least-once, so the journal *takes* a decision
+  (`DELETE … RETURNING` in Postgres) and `knowledge_lessons.ref` is unique. A duplicated
+  lesson raises nothing — it quietly doubles that trade's weight in every dataset built
+  afterwards.
+
+A close whose notional is unknown records **nothing** rather than inventing a denominator: a
+fabricated return in permanent memory is worse than a missing one, and the unresolved decision
+stays visible in the open-decision gauge.
+
+### Two more things Phase 1 fixed
+
+- **A promotion now reaches the running process.** `set_active()` ran only at startup and
+  nothing subscribed to `ModelPromoted`, so the entire human-gated promotion machinery worked
+  perfectly and changed nothing until the worker was restarted.
+- **Quality signals are measured, not configured.** `dataset_quality` and `sample_support`
+  were read once from settings and never recomputed — two numbers presented to the confidence
+  engine as measurements that were in fact the constants 0.5 and 0.35, forever. They are now
+  derived from the dataset: support saturates at `min_outcomes_to_train`, and quality is label
+  balance, which scores **0.0 for a single-class dataset** — the truth, and precisely the
+  state the platform was in.
+
+### Persistence & operation
+
+Three tables (migration `0010_knowledge_tables`): `knowledge_observations` and
+`knowledge_lessons` are append-only; `knowledge_decisions` holds open decisions and shrinks as
+they settle, so unbounded growth there is a visible symptom of the loop breaking rather than a
+silent one. Read-only API at `/api/v1/knowledge`, `/knowledge/lessons` and
+`/knowledge/status`. Config under `KNOWLEDGE_*`.
+
+The field worth watching is **`is_trainable`**: whether the memory holds both classes. It
+answers in one boolean the question that cost this project weeks — *can a model be validated
+against what we have?* — and a memory of half a million observations with every lesson on the
+same side of zero answers `false`, however healthy every other panel looks.
+
+> **Cold start is not "solved" by this phase — it is now *possible* to solve.** The loop is
+> closed and the plumbing is proven end-to-end in tests, but the platform still needs to
+> actually open and close trades to accumulate both classes. Generating those first positives
+> without asking the committee to decide before it can know is **Phase 2**, and it should not
+> be confused with recalibrating thresholds.
+
+---
+
 ## 7. Testing
 
 `backend/tests` (379 tests, all green; `mypy --strict` clean; `ruff` clean; suite runs
@@ -1637,6 +1757,27 @@ warnings-as-errors):
   Mode blocks LIVE**; readiness tuples carry the required flag),
   `test_discord_embed_builder` (category colours; only-present fields; footer +
   timestamp). `test_persistence_schema` now covers `config_snapshots`.
+- Phase 1 — Knowledge (2026-07-28), **+37 tests**: `test_knowledge_isolation`
+  (**AST-enforced**: the context imports no other bounded context at all — an allowlist, so a
+  context added later is covered without anyone remembering; its runtime does not reintroduce
+  the coupling; **every subscribed event name resolves to a real event class**, so a rename
+  breaks the build instead of silently un-recording a producer; the public domain vocabulary
+  names no action), `test_knowledge_units` (NaN/inf and blank subjects rejected at *both*
+  boundaries; a rejection is announced, never swallowed; a store failure is re-raised rather
+  than hidden; **break-even is not a win**; the verification floor orders by strength and not
+  alphabetically; a single-class memory reports itself untrainable; take-once settlement;
+  idempotent lesson append; lessons load oldest-first so a walk-forward split cannot train on
+  the future), `test_knowledge_loop` (**the whole loop over a real bus**: a closed paper trade
+  becomes a ground-truth lesson; **the lesson carries the features from entry even after the
+  token's features change completely before the close** — the anti-leakage guarantee, and the
+  one regression here that would look like success; losses recorded as negatives; the memory
+  reports `is_trainable` only with both classes; a redelivered close produces no second
+  lesson; **a close with no known notional records nothing rather than fabricating a return**;
+  committee beliefs travel with the lesson; a close is both an observation and a lesson),
+  `test_committee_learning_loop` (a `LessonLearned` reaches the outcome ledger at full weight
+  with the lesson's own features; both classes arrive; **a promotion swaps the active
+  committee without a restart**; quality signals are derived from the dataset and score
+  **0.0 for a single class** instead of the configured 0.5).
 
 Everything is testable because every dependency is a port; in-memory adapters
 back the tests, real adapters back production. The frontend passes `tsc` and a

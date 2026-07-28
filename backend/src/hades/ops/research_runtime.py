@@ -125,9 +125,7 @@ class ResearchRuntime:
 
     def _register(self) -> None:
         if self._c.settings.research.shadow_enabled:
-            self._c.event_bus.subscribe(
-                FeaturesComputed.__name__, self._on_features_computed
-            )
+            self._c.event_bus.subscribe(FeaturesComputed.__name__, self._on_features_computed)
 
     async def _on_features_computed(self, event: DomainEvent) -> None:
         await self._shadow_handler.on_features_computed(event)
