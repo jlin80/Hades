@@ -92,7 +92,13 @@ async def anomalies(
     if container.database is None:
         return empty
 
-    stmt = select(DataAnomaly).order_by(desc(DataAnomaly.detected_at)).limit(limit)
+    # Worst first: the problem seen 900 times deserves attention before the one
+    # seen once, and recency alone would bury it under a fresh singleton.
+    stmt = (
+        select(DataAnomaly)
+        .order_by(desc(DataAnomaly.occurrences), desc(DataAnomaly.detected_at))
+        .limit(limit)
+    )
     if kind:
         stmt = stmt.where(DataAnomaly.kind == kind)
 
@@ -116,11 +122,17 @@ async def anomalies(
                 "kind": r.kind,
                 "field": r.field,
                 "detail": r.detail,
+                # How many times this exact problem recurred. One row that was
+                # seen 900 times and 900 distinct broken tokens are very
+                # different diagnoses, and the count is what separates them.
+                "occurrences": int(r.occurrences),
+                "first_at": r.first_detected_at.isoformat() if r.first_detected_at else None,
                 "at": r.detected_at.isoformat() if r.detected_at else None,
             }
             for r in rows
         ],
         # The breakdown is the useful part: it turns one big number into a
-        # diagnosis of which source or field is misbehaving.
+        # diagnosis of which source or field is misbehaving. Counted in distinct
+        # problems, which is what the list above shows.
         "by_kind": {str(k): int(c) for k, c in counts},
     }

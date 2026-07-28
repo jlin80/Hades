@@ -45,11 +45,15 @@ _SCALAR_FIELDS = (
 
 @dataclass
 class CollectedMetadata:
-    """Merged metadata plus provenance (who answered, who failed)."""
+    """Merged metadata plus provenance (who answered, who failed, what we never asked)."""
 
     metadata: TokenMetadata
     providers: tuple[str, ...] = ()
     failures: tuple[str, ...] = field(default_factory=tuple)
+    #: Fields whose every source failed this round. A ``None`` here means "not
+    #: collected", not "absent from the token" — the Quality Validator must not
+    #: report these as incomplete data, because we never successfully looked.
+    unavailable: frozenset[str] = field(default_factory=frozenset)
 
 
 class MetadataCollector:
@@ -64,13 +68,24 @@ class MetadataCollector:
         merged = _base_metadata(token)
         answered: list[str] = []
         failed: list[str] = []
+        covered: set[str] = set()
+        lost: set[str] = set()
         for provider, partial in zip(self._providers, results, strict=True):
             if partial is None:
                 failed.append(provider.name)
+                lost |= _provides(provider)
                 continue
             answered.append(provider.name)
+            covered |= _provides(provider)
             merged = _merge(merged, partial, provider.name)
-        return CollectedMetadata(metadata=merged, providers=tuple(answered), failures=tuple(failed))
+        return CollectedMetadata(
+            metadata=merged,
+            providers=tuple(answered),
+            failures=tuple(failed),
+            # A field is only truly unavailable when *no* surviving provider
+            # covers it; if another source answered, its silence is real data.
+            unavailable=frozenset(lost - covered),
+        )
 
     async def _safe(self, provider: MetadataProvider, token: TokenRef) -> TokenMetadata | None:
         try:
@@ -78,6 +93,12 @@ class MetadataCollector:
         except Exception as exc:  # TimeoutError included — a provider must not break collection
             _logger.warning("metadata_provider_failed", provider=provider.name, error=str(exc))
             return None
+
+
+def _provides(provider: MetadataProvider) -> set[str]:
+    """Fields ``provider`` is a source for; a provider that says nothing covers all."""
+    declared = getattr(provider, "provides", None)
+    return set(declared) if declared else set(_SCALAR_FIELDS)
 
 
 def _base_metadata(token: TokenRef) -> TokenMetadata:
