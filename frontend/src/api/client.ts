@@ -147,11 +147,41 @@ export interface ExecutionMetrics {
   transaction_stats?: Record<string, number>;
 }
 
+export interface OpenPosition {
+  mint: string;
+  symbol: string | null;
+  name: string | null;
+  notional_usd: number;
+  unrealized_pnl_usd: number;
+  strategy: string;
+  regime: string;
+  opened_at: string | null;
+}
+
+// --- Pipeline funnel ---------------------------------------------------------
+
+export interface FunnelStage {
+  key: string;
+  label: string;
+  count: number;
+}
+
+export interface Funnel {
+  window_hours: number;
+  stages: FunnelStage[];
+  reject_reasons: Record<string, number>;
+  open_positions_now?: number;
+  diagnosis: string;
+}
+
 export interface AnomalyRow {
   subject: string;
   kind: string;
   field: string;
   detail: string;
+  /** How many times this exact problem recurred (one row per distinct problem). */
+  occurrences: number;
+  first_at: string | null;
   at: string | null;
 }
 
@@ -381,6 +411,10 @@ export interface ResearchStatus {
   knowledge_total: number;
   live: {
     shadow_strategies?: ShadowStrategy[];
+    /** Whether the recurring-study scheduler is on. Without it the lab runs but studies nothing. */
+    auto_research?: boolean;
+    /** Labelled outcomes available to study; studies defer below the configured minimum. */
+    historical_samples?: number;
     [key: string]: unknown;
   };
 }
@@ -502,7 +536,12 @@ export const api = {
     get<{ anomalies: AnomalyRow[]; by_kind: Record<string, number> }>(
       "/api/v1/scanner/anomalies?limit=50",
     ),
+  funnel: () => get<Funnel>("/api/v1/funnel?hours=24"),
   portfolio: () => get<PortfolioStatus>("/api/v1/portfolio"),
+  portfolioPositions: () =>
+    get<{ positions: OpenPosition[]; open_positions: number; invested_usd: number }>(
+      "/api/v1/portfolio/positions",
+    ),
   portfolioCapital: () => get<PortfolioLive>("/api/v1/portfolio/capital"),
   portfolioPnl: () => get<{ pnl: PnlRow[] }>("/api/v1/portfolio/pnl?limit=50"),
   portfolioEquityCurve: () =>

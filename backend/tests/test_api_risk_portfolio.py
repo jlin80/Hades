@@ -58,3 +58,20 @@ def test_portfolio_endpoints_answer() -> None:
         assert "available_usd" in cap
         analytics = client.get("/api/v1/portfolio/analytics").json()
         assert "metrics" in analytics
+
+
+def test_open_positions_endpoint_answers_without_a_worker() -> None:
+    """`invested_usd` says capital left cash; this says which tokens hold it.
+
+    The dashboard could report "1 open position" with no way to learn which
+    token it was — the API had no endpoint for the open book at all. Like every
+    dashboard endpoint it degrades to empty rather than failing when the
+    Worker's snapshot is absent.
+    """
+    with TestClient(create_app()) as client:
+        resp = client.get("/api/v1/portfolio/positions")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["positions"] == []
+        assert body["open_positions"] == 0

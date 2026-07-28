@@ -32,6 +32,28 @@ async def portfolio(container: Container = Depends(get_container)) -> dict[str, 
     return {"running": live is not None, "live": live or {}}
 
 
+@router.get("/positions", summary="Open positions — which tokens hold the invested capital")
+async def positions(container: Container = Depends(get_container)) -> dict[str, Any]:
+    """The open book, one row per position.
+
+    ``invested_usd`` says how much capital left cash; this says where it went.
+    Without it the dashboard could report "1 open position" and an operator had
+    no way to learn which token held it — the single most common question asked
+    of a running bot, and the one the API could not answer.
+
+    Sourced from the Worker's Redis snapshot, so it reflects the live in-memory
+    book rather than a replayed event log.
+    """
+    live = await _live(container) or {}
+    rows = live.get("positions")
+    return {
+        "positions": rows if isinstance(rows, list) else [],
+        "open_positions": live.get("open_positions", 0),
+        "invested_usd": live.get("invested_usd", 0.0),
+        "updated_at": live.get("updated_at"),
+    }
+
+
 @router.get("/analytics", summary="Portfolio performance metrics")
 async def analytics(container: Container = Depends(get_container)) -> dict[str, Any]:
     live = await _live(container) or {}

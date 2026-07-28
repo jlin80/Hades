@@ -3,6 +3,9 @@ import {
   api,
   type EquityPoint,
   type ExecutionMetrics,
+  type Funnel,
+  type FunnelStage,
+  type OpenPosition,
   type PnlRow,
   type PortfolioStatus,
 } from "../api/client";
@@ -53,6 +56,27 @@ function Stat({ label, value, hint }: { label: string; value: string | number; h
   );
 }
 
+/** One funnel stage, its bar scaled against the widest stage (discovery). A
+ *  stage at zero is drawn red, because that is the one worth looking at. */
+function FunnelBar({ stage, of }: { stage: FunnelStage; of: number }) {
+  const width = of > 0 ? Math.max((stage.count / of) * 100, stage.count > 0 ? 1.5 : 0) : 0;
+  const dead = stage.count === 0;
+  return (
+    <div className="py-1.5">
+      <div className="flex items-baseline justify-between text-xs">
+        <span className={dead ? "text-red-400" : "text-gray-300"}>{stage.label}</span>
+        <span className={dead ? "font-medium text-red-400" : "text-gray-100"}>{stage.count}</span>
+      </div>
+      <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-white/5">
+        <div
+          className={`h-full rounded-full ${dead ? "bg-red-500/40" : "bg-hades-accent/60"}`}
+          style={{ width: `${width}%` }}
+        />
+      </div>
+    </div>
+  );
+}
+
 /** Equity over time, drawn inline. No chart library: the CSP forbids external
  *  scripts, and a polyline is all this needs. */
 function Sparkline({ points }: { points: EquityPoint[] }) {
@@ -95,6 +119,8 @@ export function PortfolioScreen() {
   const [pnl, setPnl] = useState<PnlRow[]>([]);
   const [curve, setCurve] = useState<EquityPoint[]>([]);
   const [execution, setExecution] = useState<ExecutionMetrics | null>(null);
+  const [funnel, setFunnel] = useState<Funnel | null>(null);
+  const [positions, setPositions] = useState<OpenPosition[]>([]);
 
   useEffect(() => {
     const load = () => {
@@ -113,6 +139,14 @@ export function PortfolioScreen() {
       api
         .executionMetrics()
         .then(setExecution)
+        .catch(() => undefined);
+      api
+        .funnel()
+        .then(setFunnel)
+        .catch(() => undefined);
+      api
+        .portfolioPositions()
+        .then((r) => setPositions(r.positions))
         .catch(() => undefined);
     };
     load();
@@ -158,6 +192,65 @@ export function PortfolioScreen() {
         />
       </div>
 
+      {/* "Invested $57.92" says capital left cash; this says where it went. The
+          count on its own is the one number an operator cannot act on. */}
+      <Panel title="Open positions">
+        {positions.length === 0 ? (
+          <Placeholder
+            note={
+              (live.open_positions ?? 0) > 0
+                ? "The book reports open positions but the worker has not published them yet."
+                : "No open positions."
+            }
+          />
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-sm">
+              <thead>
+                <tr className="border-b border-white/5 text-xs uppercase tracking-wide text-hades-muted">
+                  <th className="px-3 py-2 font-medium">Token</th>
+                  <th className="px-3 py-2 font-medium">Size</th>
+                  <th className="px-3 py-2 font-medium">Unrealised</th>
+                  <th className="px-3 py-2 font-medium">Strategy</th>
+                  <th className="px-3 py-2 font-medium">Opened</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-white/5">
+                {positions.map((p) => (
+                  <tr key={p.mint}>
+                    <td className="px-3 py-2">
+                      <span className="text-gray-100">{p.symbol ?? p.name ?? "—"}</span>{" "}
+                      <span
+                        className="font-mono text-xs text-hades-muted"
+                        title={p.mint}
+                      >
+                        {p.mint.slice(0, 8)}…
+                      </span>
+                    </td>
+                    <td className="px-3 py-2 text-gray-100">{usd(p.notional_usd)}</td>
+                    <td
+                      className={`px-3 py-2 ${
+                        p.unrealized_pnl_usd > 0
+                          ? "text-emerald-400"
+                          : p.unrealized_pnl_usd < 0
+                            ? "text-red-400"
+                            : "text-gray-300"
+                      }`}
+                    >
+                      {usd(p.unrealized_pnl_usd)}
+                    </td>
+                    <td className="px-3 py-2 text-hades-muted">{p.strategy}</td>
+                    <td className="px-3 py-2 text-hades-muted">
+                      {p.opened_at ? new Date(p.opened_at).toLocaleString() : "—"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Panel>
+
       <div className="grid gap-6 md:grid-cols-2">
         <Panel title="Equity curve">
           <Sparkline points={curve} />
@@ -178,8 +271,48 @@ export function PortfolioScreen() {
             Realised PnL is already net of both round-trip frictions — the entry fee
             captured when the position opened plus the exit fee.
           </p>
+          {/* These counters live in the worker's memory, while the book is now
+              persisted. After a restart they read zero next to positions that
+              are genuinely open — which looks like a contradiction until you
+              know the counters are session-scoped and the book is not. */}
+          <p className="mt-2 text-xs text-hades-muted/70">
+            Counted since the worker last started, not since inception — they reset on
+            restart while the open book survives it.
+          </p>
         </Panel>
       </div>
+
+      {/* "The bot runs but the portfolio never moves" is the hardest question to
+          answer from this screen, because a flat equity curve looks identical
+          whether nothing qualified or a stage is silently dropping everything.
+          The funnel makes the cliff visible: the stage where the bar collapses
+          is the stage to go look at. */}
+      <Panel title="Pipeline funnel — last 24h">
+        {funnel === null ? (
+          <Placeholder note="Funnel unavailable." />
+        ) : (
+          <>
+            <p className="mb-4 text-sm text-gray-300">{funnel.diagnosis}</p>
+            {funnel.stages.map((stage) => (
+              <FunnelBar key={stage.key} stage={stage} of={funnel.stages[0]?.count ?? 0} />
+            ))}
+            {Object.keys(funnel.reject_reasons).length > 0 && (
+              <div className="mt-4 border-t border-white/5 pt-3">
+                <div className="mb-2 text-xs uppercase tracking-wide text-hades-muted">
+                  Why Risk rejected
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {Object.entries(funnel.reject_reasons).map(([reason, count]) => (
+                    <Badge key={reason} tone="neutral">
+                      {reason}: {count}
+                    </Badge>
+                  ))}
+                </div>
+              </div>
+            )}
+          </>
+        )}
+      </Panel>
 
       <Panel title="PnL log">
         {pnl.length === 0 && <Placeholder note="No closed trades yet." />}

@@ -111,7 +111,7 @@ export function ScannerScreen() {
         </div>
         {anomalies.slice(0, 15).map((a, i) => (
           <Row
-            key={`${a.subject}-${i}`}
+            key={`${a.subject}-${a.kind}-${a.field}-${i}`}
             label={
               <span className="font-mono text-xs">
                 {a.subject.slice(0, 10)}… · {a.field}
@@ -120,6 +120,11 @@ export function ScannerScreen() {
             value={
               <span className="text-xs">
                 <span className="text-hades-muted">{a.kind}</span> — {a.detail}
+                {/* A problem seen once and a problem seen 900 times read
+                    identically without this; the count is the whole diagnosis. */}
+                {a.occurrences > 1 && (
+                  <span className="ml-2 text-hades-muted">×{a.occurrences}</span>
+                )}
               </span>
             }
           />

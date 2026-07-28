@@ -257,6 +257,23 @@ class RiskRuntime:
             "drawdown_pct": pf.drawdown_pct,
             "exposure_pct": pf.exposure_pct,
             "open_positions": pf.open_positions,
+            # The count alone told an operator that capital had left cash without
+            # telling them where it went: "1 open position" and no way to learn
+            # which token holds it, at what size, or whether it is up or down.
+            # The book already knows all of it; only the snapshot was lossy.
+            "positions": [
+                {
+                    "mint": str(p.token.mint),
+                    "symbol": p.token.symbol,
+                    "name": p.token.name,
+                    "notional_usd": p.notional_usd,
+                    "unrealized_pnl_usd": p.unrealized_pnl_usd,
+                    "strategy": p.strategy,
+                    "regime": p.regime,
+                    "opened_at": p.opened_at.isoformat() if p.opened_at else None,
+                }
+                for p in state.open_positions
+            ],
             "reserve_pct": self._c.settings.risk.liquidity_reserve_pct,
             "available_usd": state.capital.available_usd,
             "metrics": metrics.model_dump(),
