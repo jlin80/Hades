@@ -20,6 +20,35 @@
 | **Backend tests** | **378 passing** · `mypy --strict` clean (407 src files) · **`ruff` clean (0 findings)** · suite runs **warnings-as-errors** |
 | **Deployment** | `docker compose up -d` is now a complete, no-manual-steps bring-up: a one-shot `migrate` service applies the schema to head before any app service starts. |
 
+> **⚠️ Architecture audit, 2026-07-28 — read before planning any new capability.**
+> A full audit of the backend and of `HadesResearchLab` is recorded in
+> [`docs/ARCHITECTURE_AUDIT_2026-07-28.md`](docs/ARCHITECTURE_AUDIT_2026-07-28.md).
+> It found the code sound and the **event graph incomplete**: three open circuits mean
+> the platform cannot learn from its own trades, no matter how it is configured.
+>
+> - **The learning loop has no write path.** `KnowledgeFeedback.record_outcome()` — the
+>   method that turns a closed trade into a training sample — has **zero callers**. The
+>   outcome ledger therefore holds only weak negatives from `TokenRejected`: a
+>   **single-class dataset**, on which `ValidationEngine.min_auc = 0.55` can never be met.
+>   No candidate model can ever be validated, so the committee is permanently pinned to its
+>   default priors. **This, not the 0.4626 vs. 0.55 threshold, is the real cold-start lock.**
+> - **The Strategy Engine has no consumer.** `EnsembleSignalGenerated` is published and
+>   nobody subscribes. All fifteen strategies, the weighted ensemble and the dynamic weight
+>   engine influence nothing. Risk consumes `CommitteePredictionGenerated` directly.
+>   `strategy.gate_risk` is read only for logs.
+> - **A model promotion does not reach the runtime** until the worker restarts —
+>   `set_active()` is called only at startup and nothing subscribes to `ModelPromoted`.
+>
+> Also: `contexts/scoring` and `contexts/wallet` have **no wiring anywhere** (§6d/§6i and the
+> §4 context list describe them as pipeline stages — they are not); the whole pipeline runs
+> in the single `worker` process while `engine` sits idle; and the Research Lab bridge is
+> incompatible on format, model family *and* feature space at once (see
+> [`docs/RESEARCH_LAB_BRIDGE.md`](docs/RESEARCH_LAB_BRIDGE.md)).
+>
+> The audit's phase plan is ordered so that **the learning loop is closed before any
+> threshold is recalibrated** — lowering thresholds first would produce trades whose results
+> still never reach the ledger, hiding the defect behind apparent activity.
+
 Phase 1 established the architecture skeleton (bounded contexts, contracts,
 domain events, shared kernel). Phase 2 built the full platform the system runs on
 (Docker services, DB, Redis, logging, watchdog, notifications, backups, API/WS,

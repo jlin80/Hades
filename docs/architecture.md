@@ -9,33 +9,55 @@ event map — plus the Architecture Decision Records. Everything here is traced 
 
 ## 1. Decision pipeline (data flow)
 
-Data flows one way. The scoring/AI layer only ever produces probabilities; **only the Risk
-Manager authorises a trade**, and only the Execution Engine knows paper vs. live.
+Data flows one way. The AI layer only ever produces probabilities; **only the Risk Manager
+authorises a trade**, and only the Execution Engine knows paper vs. live.
+
+> **This diagram was corrected on 2026-07-28.** It previously showed a
+> `Committee → Scoring → Strategy → Risk` chain that the code does not execute: the `scoring`
+> context has no wiring at all, and the Strategy Engine runs *in parallel* with Risk rather
+> than upstream of it. Dashed red edges below are **breaks in the graph** — a producer with no
+> consumer. See [`ARCHITECTURE_AUDIT_2026-07-28.md`](ARCHITECTURE_AUDIT_2026-07-28.md) §8.
 
 ```mermaid
 flowchart TD
     SC[Scanner] -->|TokenDiscovered, TokenMetadataCollected| FE[Feature Store]
-    FE -->|features assembled| SE[Security Engine]
+    FE -->|FeaturesComputed| SE[Security Engine]
     SE -->|SecurityScoreComputed / TokenApproved| WI[Wallet Intelligence]
     WI -->|WalletIntelligenceComputed| AI[AI Committee]
-    AI -->|CommitteePredictionGenerated| SCO[Scoring]
-    SCO -->|FinalScoreComputed| ST[Strategy Engine]
-    ST -->|EnsembleSignalGenerated| RK[Risk Manager]
+    AI -->|CommitteePredictionGenerated| RK[Risk Manager]
+    AI -->|CommitteePredictionGenerated| ST[Strategy Engine]
+    ST -.->|EnsembleSignalGenerated| GAP1[["✗ no subscriber"]]:::broken
     RK -->|TradeApproved| EX[Execution Engine]
     RK -.->|TradeRejected| NO[(no trade)]
-    EX -->|OrderFilled → PositionOpened/Closed| PF[Portfolio]
+    EX -->|OrderFilled → PositionOpened| PF[Portfolio]
+    PF -->|PositionUpdated / PositionClosed| PM[Position Monitor]
+    PM -->|SELL on TP/SL/trailing| EX
 
-    SE -.->|TokenRejected| DROP[(analysis stops)]
+    SE -.->|TokenRejected| KF[Knowledge Feedback]
+    KF -->|weak negative samples| OS[(OutcomeStore)]
+    PF -.->|realised labels| GAP2[["✗ record_outcome has no caller"]]:::broken
+
+    SE & WI -->|facts| FC[EventDrivenRiskFacts] --> RK
 
     classDef quantify fill:#eef,stroke:#88a;
     classDef decide fill:#fee,stroke:#a88;
-    class SC,FE,SE,WI,AI,SCO,ST quantify;
+    classDef broken fill:#fdd,stroke:#c00,stroke-width:2px,stroke-dasharray: 4 4;
+    class SC,FE,SE,WI,AI,ST quantify;
     class RK,EX decide;
 ```
 
-- **Quantify (blue):** Scanner → … → Strategy Engine. Produce evidence; never decide.
+- **Quantify (blue):** Scanner → … → AI Committee. Produce evidence; never decide.
 - **Decide (red):** Risk Manager (sole trade authoriser) → Execution Engine (sole
   mode-aware component).
+- **Broken (dashed red):** the Strategy Engine's ensemble output and the realised-outcome
+  write-path back into the AI Committee. Both are implemented, tested and unreachable. The
+  second one is why the platform cannot learn.
+
+### Contexts with no wiring
+
+`contexts/scoring` and `contexts/wallet` exist as domain packages with **zero references from
+anywhere else in the codebase**. `FinalScoreComputed` and `WalletScoreComputed` are never
+published. They are listed in §4's event map for completeness, marked accordingly.
 
 ## 2. Service topology (Docker Compose)
 
@@ -119,10 +141,10 @@ idempotent).
 | **scanner** | `TokenDiscovered`, `PoolDiscovered`, `TokenMetadataCollected`, `SignificantChangeDetected`, `RpcEndpointSwitched`, `SourceHealthChanged`, `DataQualityAnomalyDetected` | Feature Store, Security Engine, Watchdog |
 | **security** | `SecurityScoreComputed`, `TokenApproved`, `TokenRejected`, `ContractRiskDetected`, `LiquidityWarning`, `ClusterFound`, `DeveloperRisk` | Wallet Intelligence, AI Committee, Audit |
 | **intelligence** (wallet KB) | `WalletProfileComputed`, `WalletIntelligenceComputed`, `SmartMoneyDetected`, `ReputationUpdated`, `ClusterCreated`, `FundingRelationshipFound`, … | AI Committee |
-| **wallet** | `WalletScoreComputed` | Scoring, AI Committee |
+| **wallet** ⚠️ | `WalletScoreComputed` — **never published; the context has no wiring** | *(none)* |
 | **learning** (AI Committee) | `CommitteePredictionGenerated`, `InferenceCompleted`, `ConfidenceCalculated`, `ModelTrained`/`Validated`/`Promoted`/`Rejected`, `ModelDriftDetected` | Scoring, Strategy, Audit, Monitoring |
-| **scoring** | `FinalScoreComputed` | Strategy Engine |
-| **strategy** | `EnsembleSignalGenerated`, `SignalGenerated`/`Rejected`, `StrategyLoaded`/`Disabled`/`Error`, `ShadowActivated`, `StrategyPromoted`, `WeightUpdated` | Risk Manager, Audit |
+| **scoring** ⚠️ | `FinalScoreComputed` — **never published; the context has no wiring** | *(none)* |
+| **strategy** | `EnsembleSignalGenerated` ⚠️ **(no subscriber)**, `SignalGenerated`/`Rejected`, `StrategyLoaded`/`Disabled`/`Error`, `ShadowActivated`, `StrategyPromoted`, `WeightUpdated` | Audit only |
 | **risk** | `TradeApproved`, `TradeRejected`, `RiskReduced`, `KillSwitch*`, `CircuitBreaker*`, `EmergencyMode*`, `Drawdown/ExposureLimitBreached`, `RiskControlCommandIssued` | Execution, Portfolio, Audit, Notification |
 | **execution** | `OrderSubmitted`, `OrderFilled`, `OrderFailed`, `TradingModeChanged` | Portfolio, Notification, Audit |
 | **portfolio** | `PositionOpened`, `PositionUpdated`, `TrailingStopAdjusted`, `PositionClosed`, `CapitalCommitted`/`Released`, `PortfolioUpdated` | Risk Manager, Monitoring, Notification |
