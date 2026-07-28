@@ -18,7 +18,7 @@ import httpx
 
 from hades.contexts.common.domain.value_objects import TokenRef
 from hades.contexts.security.domain.models import HoneypotProbe
-from hades.shared_kernel.logging import get_logger
+from hades.shared_kernel.logging import describe, get_logger
 
 _logger = get_logger("security.honeypot")
 
@@ -27,13 +27,25 @@ _WSOL = "So11111111111111111111111111111111111111112"
 _SOL_PRICE_USD = 150.0  # coarse fallback for sizing the probe (not a price feed)
 
 
+#: Jupiter's current public quote route.
+#:
+#: The previous default, ``https://quote-api.jup.ag/v6/quote``, was retired by
+#: Jupiter and its hostname no longer resolves — ``quote-api.jup.ag`` returns
+#: EAI_NODATA while ``lite-api.jup.ag`` and ``api.jup.ag`` answer normally. The
+#: failure was quiet in the worst way: the probe returns "doubt, not crash", the
+#: Security Engine reads an unavailable buy route as an unproven token, and a
+#: deployment sat for hours rejecting *every* candidate on a dead URL while each
+#: component reported itself healthy.
+DEFAULT_QUOTE_URL = "https://lite-api.jup.ag/swap/v1/quote"
+
+
 class JupiterSwapSimulator:
-    """Probes sellability with Jupiter v6 quote routes (buy then sell)."""
+    """Probes sellability with Jupiter quote routes (buy then sell)."""
 
     def __init__(
         self,
         *,
-        base_url: str = "https://quote-api.jup.ag/v6/quote",
+        base_url: str = DEFAULT_QUOTE_URL,
         timeout_seconds: float = 8.0,
         slippage_bps: int = 500,
         client: httpx.AsyncClient | None = None,
@@ -82,7 +94,7 @@ class JupiterSwapSimulator:
                 return None
             body = resp.json()
         except Exception as exc:  # never raise — doubt, not crash
-            _logger.warning("jupiter_quote_failed", error=str(exc))
+            _logger.warning("jupiter_quote_failed", error=describe(exc))
             return None
         return body if isinstance(body, dict) and body.get("outAmount") else None
 

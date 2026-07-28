@@ -113,8 +113,9 @@ class SecurityRuntime:
         return RpcManager(endpoints, settings=s.rpc, metrics=self._c.metrics)
 
     def _build_swap(self) -> JupiterSwapSimulator | NullSwapSimulator:
-        if self._c.settings.security.honeypot_enabled:
-            return JupiterSwapSimulator()
+        s = self._c.settings.security
+        if s.honeypot_enabled:
+            return JupiterSwapSimulator(base_url=s.honeypot_quote_url)
         return NullSwapSimulator()
 
     def _list_registry(self) -> ListRegistry:

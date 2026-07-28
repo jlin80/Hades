@@ -303,6 +303,13 @@ class SecuritySettings(_Section):
     fetch_holder_count: bool = False  # getProgramAccounts scan — off by default
     honeypot_enabled: bool = True
     honeypot_probe_usd: float = 50.0
+    # The honeypot probe's quote route. Configurable because a third party can
+    # retire an endpoint at any time, and when this one dies *every* token fails
+    # its sellability check and nothing can ever be approved — that must be
+    # fixable by an operator editing .env, not by cutting a release. The literal
+    # is repeated from ``security.infrastructure.swap_simulator`` rather than
+    # imported: shared_kernel must not depend on a context.
+    honeypot_quote_url: str = "https://lite-api.jup.ag/swap/v1/quote"
     cluster_live_lookups: bool = True  # bounded funding-graph RPC lookups
     cluster_max_holders: int = 12
     cluster_min_members: int = 3
