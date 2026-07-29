@@ -1,0 +1,76 @@
+{
+  "bundle_format": "hades.knowledge/v1",
+  "bundle_id": "0198c0de-1a2b-4c3d-8e4f-5a6b7c8d9e0f",
+  "checksum": "0450b60f82b6314b912c9f4788067598962a4079d8b37c7314636fd3f7e63c86",
+  "notes": "contract fixture — shared by both repositories",
+  "produced_at": "2026-07-28T09:30:00+00:00",
+  "produced_by": "hades-research-lab",
+  "records": [
+    {
+      "correlation_id": null,
+      "features": {
+        "expectancy": 0.021,
+        "sharpe": 1.41
+      },
+      "kind": "simulation",
+      "occurred_at": "2026-07-28T09:30:00+00:00",
+      "payload": {
+        "max_drawdown": 0.18,
+        "profit_factor": 1.62,
+        "total_return": 0.34,
+        "trades": 214
+      },
+      "source": "backtest",
+      "subject": "momentum_breakout",
+      "subject_type": "strategy"
+    },
+    {
+      "correlation_id": null,
+      "features": {
+        "oos_sharpe": 0.96
+      },
+      "kind": "simulation",
+      "occurred_at": "2026-07-28T09:30:00+00:00",
+      "payload": {
+        "consistency": 0.75,
+        "degradation": 0.12,
+        "folds": 4
+      },
+      "source": "walk_forward",
+      "subject": "momentum_breakout",
+      "subject_type": "strategy"
+    },
+    {
+      "correlation_id": null,
+      "features": {
+        "ruin_probability": 0.04
+      },
+      "kind": "simulation",
+      "occurred_at": "2026-07-28T09:30:00+00:00",
+      "payload": {
+        "p05_return": -0.09,
+        "p95_return": 0.71,
+        "simulations": 1000
+      },
+      "source": "monte_carlo",
+      "subject": "momentum_breakout",
+      "subject_type": "strategy"
+    },
+    {
+      "correlation_id": null,
+      "features": {
+        "information_coefficient": 0.11
+      },
+      "kind": "experiment",
+      "occurred_at": "2026-07-28T09:30:00+00:00",
+      "payload": {
+        "conclusion": "gini above 0.82 raises SL rate materially",
+        "hypothesis": "holder concentration predicts rug risk",
+        "status": "confirmed"
+      },
+      "source": "research_lab",
+      "subject": "feature:holders.gini",
+      "subject_type": "platform"
+    }
+  ]
+}

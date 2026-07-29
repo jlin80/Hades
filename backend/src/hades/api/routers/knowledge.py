@@ -28,6 +28,8 @@ from fastapi import APIRouter, Depends, Query
 
 from hades.api.dependencies import get_container
 from hades.bootstrap import Container
+from hades.contexts.knowledge.application.ingest_service import KnowledgeIngestService
+from hades.contexts.knowledge.application.recorder import KnowledgeRecorder
 from hades.contexts.knowledge.domain.models import (
     KnowledgeKind,
     KnowledgeQuery,
@@ -127,6 +129,56 @@ async def knowledge(
         "limit": limit,
         "offset": offset,
         "records": [row.model_dump(mode="json") for row in rows],
+    }
+
+
+@router.post(
+    "/knowledge/import",
+    summary="Import knowledge bundles from the external Research Lab inbox",
+)
+async def import_knowledge(container: Container = Depends(get_container)) -> dict[str, Any]:
+    """Sweep the inbox and record valid bundles into permanent memory.
+
+    This is the Core's only ingestion path for the external Hades Research Lab,
+    and it is a **pull**: the lab writes bundles to a directory it owns, an
+    operator places them here, and this endpoint reads them. The two repositories
+    share no library, no schema and no network call.
+
+    What an external bundle **cannot** do, structurally:
+
+    * claim `verification: realised` — the field does not exist in the format;
+      the Core assigns it from the record's source, and every source an external
+      producer may claim maps to `simulated`;
+    * claim a platform source such as `paper_trading` or `executed_trade` — the
+      allowlist rejects it, so a file cannot pose as the trading path;
+    * express a *lesson*. Lessons are what the AI Committee trains on, and they
+      are producible only by the platform settling a trade it actually took.
+
+    Together those three mean the worst a hostile bundle achieves is inserting
+    clearly-labelled simulated observations — never poisoning the training ledger.
+    """
+    recorder = KnowledgeRecorder(_store(container), event_bus=container.event_bus)
+    service = KnowledgeIngestService(recorder, container.settings.knowledge.inbox)
+    report = await service.import_all()
+    return {
+        "inbox": container.settings.knowledge.inbox,
+        "records_imported": report.records_imported,
+        "accepted": [
+            {
+                "path": outcome.path,
+                "bundle_id": outcome.bundle_id,
+                "produced_by": outcome.produced_by,
+                "records": outcome.records,
+            }
+            for outcome in report.accepted
+        ],
+        "rejected": [
+            {"path": outcome.path, "reason": outcome.reason} for outcome in report.rejected
+        ],
+        # Stated explicitly because it is the question a reader of this response
+        # actually has: importing knowledge deploys nothing and trains nothing.
+        "promoted": False,
+        "verification": "simulated",
     }
 
 

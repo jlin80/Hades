@@ -27,6 +27,7 @@ from hades.contexts.research.application.metrics import multi_objective_score
 from hades.contexts.research.application.monte_carlo import MonteCarloEngine
 from hades.contexts.research.application.optimizer import ParameterOptimizer
 from hades.contexts.research.application.promotion import PromotionEngine
+from hades.contexts.research.application.replay_engine import ReplayEngine, ReplayResult
 from hades.contexts.research.application.reports import ReportGenerator
 from hades.contexts.research.application.strategies import evaluate
 from hades.contexts.research.application.validation import ValidationEngine, ValidationReport
@@ -40,9 +41,10 @@ from hades.contexts.research.domain.events import (
     ModelCompared,
     MonteCarloCompleted,
     PromotionRejected,
+    ReplayCompleted,
     ResearchReportGenerated,
+    ResearchStrategyPromoted,
     StrategyCompared,
-    StrategyPromoted,
     WalkForwardCompleted,
 )
 from hades.contexts.research.domain.models import (
@@ -57,6 +59,7 @@ from hades.contexts.research.domain.models import (
     PromotionCriteria,
     PromotionDecision,
     ResearchReport,
+    ShadowStrategy,
     StrategyComparison,
     ValidationStage,
     WalkForwardResult,
@@ -65,6 +68,7 @@ from hades.contexts.research.domain.ports import (
     BacktestStore,
     CandidateStore,
     ExperimentStore,
+    HistoricalDataReader,
     HistoricalSample,
     PromotionStore,
     ReportStore,
@@ -74,6 +78,10 @@ from hades.shared_kernel.events import EventBus
 from hades.shared_kernel.logging import get_logger
 
 _logger = get_logger("research.manager")
+
+
+class ResearchUnavailableError(RuntimeError):
+    """A study was requested that this manager has no collaborator to run."""
 
 
 class ResearchManager:
@@ -90,6 +98,7 @@ class ResearchManager:
         candidate_store: CandidateStore,
         promotion_store: PromotionStore,
         report_store: ReportStore,
+        historical_reader: HistoricalDataReader | None = None,
         criteria: PromotionCriteria | None = None,
     ) -> None:
         self._bus = event_bus
@@ -100,6 +109,7 @@ class ResearchManager:
         self._candidates = candidate_store
         self._promotions = promotion_store
         self._reports = report_store
+        self._reader = historical_reader
 
         self._bt = BacktestingEngine()
         self._wf = WalkForwardEngine(self._bt)
@@ -120,6 +130,10 @@ class ResearchManager:
         self._comparator = StrategyComparator()
         self._model_comparator = ModelComparator()
         self._reporter = ReportGenerator()
+        # Built only when a reader is available: a replay is a read of copied
+        # history, so without one there is nothing to replay and the method says
+        # so rather than failing obscurely deeper down.
+        self._replay = ReplayEngine(historical_reader) if historical_reader is not None else None
 
     # -- experiments ----------------------------------------------------------
 
@@ -179,6 +193,43 @@ class ResearchManager:
         )
         await self._publish(
             WalkForwardCompleted(aggregate_id=new_id(), strategy=candidate.name, result=result)
+        )
+        return result
+
+    async def run_replay(
+        self,
+        *,
+        from_iso: str,
+        to_iso: str,
+        shadows: Sequence[ShadowStrategy] = (),
+        limit: int = 100_000,
+    ) -> ReplayResult:
+        """Replay a historical window through virtual shadow strategies.
+
+        The Replay Engine has existed since Phase 9 and was never wired to
+        anything: no caller, and ``ReplayCompleted`` was registered on the bus but
+        never published. A study nobody can run produces no knowledge, which is
+        precisely the failure mode the architecture audit catalogued. It is
+        reachable now, and its completion is a fact on the bus like every other
+        finished study.
+
+        It reads copied history through a read-only reader and drives only shadow
+        runners, so it cannot place an order or mutate production state.
+        """
+        if self._replay is None:
+            raise ResearchUnavailableError(
+                "replay requires a historical reader; none was wired into this manager"
+            )
+        result = await self._replay.replay(
+            from_iso=from_iso, to_iso=to_iso, shadows=shadows, limit=limit
+        )
+        await self._publish(
+            ReplayCompleted(
+                aggregate_id=new_id(),
+                from_iso=result.from_iso,
+                to_iso=result.to_iso,
+                events_replayed=result.events_replayed,
+            )
         )
         return result
 
@@ -252,7 +303,7 @@ class ResearchManager:
         """Evaluate a candidate against the promotion bar.
 
         Returns a decision only. When APPROVED *and* manually approved by a human,
-        a :class:`StrategyPromoted` governance event is emitted — which still does
+        a :class:`ResearchStrategyPromoted` governance event is emitted — which still does
         not deploy anything, place an order, or enable live trading. Otherwise a
         :class:`PromotionRejected` event records why the bar was not cleared.
         """
@@ -268,7 +319,7 @@ class ResearchManager:
         await self._promotions.save(decision)
         await self._kb.record_promotion(decision)
         if decision.promotable:
-            await self._publish(StrategyPromoted(aggregate_id=new_id(), decision=decision))
+            await self._publish(ResearchStrategyPromoted(aggregate_id=new_id(), decision=decision))
             await self._notify(
                 title="Strategy promotion recommended",
                 body=(

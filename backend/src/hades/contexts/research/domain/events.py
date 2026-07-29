@@ -5,10 +5,18 @@ starting or finishing, a backtest or replay completing, a shadow strategy
 updating its virtual ledger, a model or strategy comparison, a proposed feature,
 a promotion recommendation being approved or rejected, a report being generated.
 
-Crucially, **none of these is an instruction**. ``StrategyPromoted`` records that
-a human approved a promotion; emitting it neither routes an order nor enables
-live trading. The Research Lab has no path to the Execution Engine — this
-isolation is structural, not merely conventional.
+Crucially, **none of these is an instruction**. ``ResearchStrategyPromoted``
+records that a human approved a promotion; emitting it neither routes an order
+nor enables live trading. The Research Lab has no path to the Execution Engine —
+this isolation is structural, not merely conventional.
+
+Note the ``Research`` prefix on that one. The bus routes on the *class name*, and
+this event used to be called ``StrategyPromoted`` — the same name the Strategy
+Engine uses for an entirely different event with an entirely different payload.
+They collided on one routing key: the registry kept whichever was registered
+last, so under the Redis transport a lab promotion was rebuilt as a strategy-
+engine promotion, and the audit trail labelled it as one. The most
+governance-sensitive event the lab emits was the one being mislabelled.
 """
 
 from __future__ import annotations
@@ -145,11 +153,15 @@ class CandidateProposed(DomainEvent):
     summary: str
 
 
-class StrategyPromoted(DomainEvent):
+class ResearchStrategyPromoted(DomainEvent):
     """A human approved a candidate's promotion recommendation.
 
     This records a governance decision; it does not by itself deploy anything to
     production, place an order, or enable live trading.
+
+    Named with the ``Research`` prefix because the bus routes on the class name
+    and the Strategy Engine owns a ``StrategyPromoted`` of its own — see the
+    module docstring.
     """
 
     aggregate_type: str = "experiment"

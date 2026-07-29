@@ -629,6 +629,14 @@ class KnowledgeSettings(_Section):
     #: Retention floor for the read API's default query window, in days. The
     #: store itself is append-only and never trimmed here.
     default_query_days: int = 30
+    #: Inbox for ``hades.knowledge/v1`` bundles produced by the external Hades
+    #: Research Lab. Ingestion is a **pull**: with nobody sweeping, a bundle on
+    #: disk does nothing. See docs/RESEARCH_LAB_BRIDGE.md.
+    inbox: str = "/app/research/knowledge-inbox"
+    #: Sweep the inbox automatically on the research runtime's schedule. Off by
+    #: default — importing external material should be a deliberate act until an
+    #: operator has decided they trust the producer feeding that directory.
+    auto_ingest: bool = False
 
 
 class ResearchSettings(_Section):

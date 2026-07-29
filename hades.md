@@ -17,7 +17,7 @@
 | **Current phase** | **Phase 11 — Production Hardening, Stage 2 (final code-quality & deployment closure)** |
 | **Version** | `0.10.0` |
 | **Trading** | Paper only. Live execution is hard-gated OFF (two switches), blocked by the Production Checklist (any failing required subsystem or an active Emergency Mode refuses the switch to LIVE), **and** — as of Stage 2 — the switch to LIVE additionally requires an authenticated operator (never the implicit `system` principal). The Execution Engine remains the *only* component that knows the mode; everything upstream is mode-agnostic. |
-| **Backend tests** | **593 passing** · `mypy --strict` clean (433 src files) · **`ruff` clean (0 findings)** · suite runs **warnings-as-errors** |
+| **Backend tests** | **629 passing** · `mypy --strict` clean (435 src files) · **`ruff` clean (0 findings)** · suite runs **warnings-as-errors** |
 | **Deployment** | `docker compose up -d` is now a complete, no-manual-steps bring-up: a one-shot `migrate` service applies the schema to head before any app service starts. |
 
 > **⚠️ Architecture audit, 2026-07-28 — read before planning any new capability.**
@@ -1643,6 +1643,98 @@ same side of zero answers `false`, however healthy every other panel looks.
 
 ---
 
+## 6n. Research as the platform's knowledge producer (Phase 2, 2026-07-28)
+
+Phase 1 gave Hades a memory. Phase 2 makes the Research Lab fill it — **both** labs: the
+internal `contexts/research`, and the external `HadesResearchLab` repository that had never
+been able to hand anything over at all.
+
+### Internal: research → knowledge, entirely over the bus
+
+Every finished study now lands in permanent memory: experiments, backtests, walk-forward,
+Monte Carlo, replays, feature proposals, reports, model and strategy comparisons, and — the
+part that used to be missing — the lab's own **conclusions**. The memory held the experiments
+but not what the lab decided about them, which is like keeping the lab notebook and throwing
+away the paper.
+
+The connection is **nothing but domain events**. Research does not import Knowledge; Knowledge
+does not import Research; `tests/test_research_isolation.py` now enforces both directions.
+That is not stylistic:
+
+- a direct call would put an ingestion failure on the lab's critical path, so a memory outage
+  would start failing research runs;
+- it would hand a context that must never act a live handle on a collaborator that writes.
+
+The lab's existing prohibition stands untouched and still AST-verified: **no import of
+`execution`, `risk` or `portfolio`.**
+
+**Everything the lab produces is `SIMULATED`, never `REALISED`.** A study is true about a
+model; only the platform settling a trade it actually took produces ground truth. Pinned by
+`test_research_knowledge_is_never_ground_truth` and `test_the_lab_produces_no_lessons`.
+
+### Two dead components, now alive
+
+- **The Replay Engine** shipped in Phase 9 with **no caller anywhere**, and `ReplayCompleted`
+  was registered on the bus and never published. A study nobody can run produces no knowledge.
+  `ResearchManager.run_replay()` now exists and publishes.
+- **`ReplayCompleted`, `StrategyCompared`, `ModelCompared`, `PromotionRejected`** and the
+  promotion decision were all published-or-registered but unrecorded. All absorbed now.
+
+### The event-name collision — a real defect, found by Phase 1's drift guard
+
+`contexts/research` and `contexts/strategy` both defined a class called `StrategyPromoted`.
+**The bus routes on the class name**, so they collided on one key and `EventRegistry` kept
+whichever was registered last. Under the Redis transport a *research* promotion — the most
+governance-sensitive event the lab emits — was rebuilt as a strategy-engine promotion with a
+different payload schema, and `AuditSubscriber` labelled it `strategy_promoted`. Nothing
+raised; a `dict` accepted the second registration silently.
+
+The research event is now `ResearchStrategyPromoted`, and
+`test_no_two_registered_events_share_a_routing_key` walks every `domain/events.py` in the
+codebase so the next collision fails at the moment the class is written.
+
+### External: the knowledge bridge
+
+`hades.knowledge/v1` — a checksummed JSON bundle the lab writes to a directory **it owns**,
+an operator moves into the Core's inbox, and `POST /api/v1/knowledge/import` sweeps. No shared
+library, no shared schema, no network call, and neither repository imports the other. It is a
+**pull**: with nobody sweeping, a bundle on disk does nothing.
+
+The lab side is `hades_research.knowledge_export`, new in that repository. It has no setting
+that could point at Hades Core — a test asserts that — so `HRL_ALLOW_CORE_WRITE=false` stays
+a property of the code rather than of an operator's restraint.
+
+**What a file is not trusted to say.** Knowledge feeds the AI Committee's training ledger, so
+an inbox that believed its input would be a way to train the platform on whatever an external
+process asserted. Three structural limits:
+
+1. **A bundle cannot declare its verification.** The field does not exist; declaring it is a
+   rejection, not an ignored key. The Core derives the level from `source`, and every source
+   an external producer may claim maps to `simulated`.
+2. **A bundle cannot claim a platform source.** `paper_trading`, `executed_trade`, `scanner`,
+   `security`, `committee` are refused by allowlist, so a file cannot pose as the platform
+   observing itself.
+3. **A bundle cannot express a *lesson*.** Lessons are the only thing the committee trains on,
+   and they are minted exclusively by the Decision Journal settling a real trade.
+
+Together: the worst a hostile or buggy bundle achieves is inserting clearly-labelled simulated
+observations. It cannot reach the ledger the brain learns from.
+
+The contract fixture is **generated by the lab's actual exporter** and committed
+byte-identically in both repositories, so drift on either side fails a build. (The candidate
+bridge's fixtures are hand-written and its docs claimed otherwise — that lesson is why this
+one is generated. See [`docs/RESEARCH_LAB_BRIDGE.md`](docs/RESEARCH_LAB_BRIDGE.md).)
+
+Every processed file is moved to `accepted/` or `rejected/`, timestamped, with the reason
+logged — a filesystem audit trail readable months later by someone without this codebase.
+
+> **What Phase 2 does not claim.** The lab can now hand over findings, and the memory records
+> them honestly as simulations. It still cannot hand over a *model*: the candidate bridge
+> remains one-sided and incompatible on format, model family and feature space, and that is a
+> product decision (audit §7.4), not an implementation gap.
+
+---
+
 ## 7. Testing
 
 `backend/tests` (379 tests, all green; `mypy --strict` clean; `ruff` clean; suite runs
@@ -1778,6 +1870,24 @@ warnings-as-errors):
   with the lesson's own features; both classes arrive; **a promotion swaps the active
   committee without a restart**; quality signals are derived from the dataset and score
   **0.0 for a single class** instead of the configured 0.5).
+- Phase 2 — Research as knowledge producer (2026-07-28), **+36 tests**:
+  `test_knowledge_bundle_contract` (the fixture **generated by the lab's exporter** parses and
+  checksums identically on both sides; **every external record is labelled `simulated`
+  whatever it claims**; declaring `verification` is a rejection rather than an ignored key; a
+  bundle cannot claim `paper_trading`/`executed_trade`/`scanner`/`security`/`committee`, nor
+  an `outcome` kind, nor express a lesson at all; wrong format, tampered checksum, unknown
+  keys, non-finite features, empty and oversized bundles all fail closed; a naive timestamp is
+  read as UTC rather than local), `test_knowledge_ingest` (a missing inbox is not an error;
+  accepted and rejected files are filed aside with their reason; **one bad bundle never aborts
+  the sweep**; processed sub-directories are never re-swept; a store outage files the bundle
+  for retry instead of losing it), `test_research_knowledge_flow` (the real `ResearchManager`
+  against the real `KnowledgeRuntime` over a real bus: backtest / walk-forward / Monte Carlo
+  each land under their own provenance; **the replay that had no caller now produces a fact**;
+  a promotion decision reaches memory and deploys nothing; **no study is ever ground truth**;
+  **a whole research session mints zero lessons**), plus `test_research_isolation` extended in
+  both directions (Research must not import Knowledge, Knowledge must not import Research) and
+  `test_events_registry` gaining the collision scan that catches two contexts naming an event
+  the same thing.
 
 Everything is testable because every dependency is a port; in-memory adapters
 back the tests, real adapters back production. The frontend passes `tsc` and a

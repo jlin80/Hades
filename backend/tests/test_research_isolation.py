@@ -43,14 +43,53 @@ def test_research_context_never_imports_execution_risk_or_portfolio() -> None:
         for imported in _imports(path):
             if any(imported.startswith(f) for f in _FORBIDDEN):
                 offenders.append(f"{path.name} imports {imported}")
-    assert not offenders, (
-        "Research Lab must not depend on trading contexts: " + "; ".join(offenders)
+    assert not offenders, "Research Lab must not depend on trading contexts: " + "; ".join(
+        offenders
     )
+
+
+def test_research_does_not_import_knowledge_either() -> None:
+    """The lab feeds permanent memory, and must not know that it does.
+
+    Research became the platform's official knowledge producer in Phase 2, and
+    the obvious way to build that would have been to hand the lab a recorder to
+    call. The connection is domain events instead: the lab publishes what it
+    finished, the memory happens to be listening, and either could be deleted
+    without the other failing to import.
+
+    That is not stylistic. A direct call would put an ingestion failure on the
+    lab's critical path — a memory outage would start failing research runs — and
+    would give a context that must never act a handle on a collaborator that
+    writes. Events keep the coupling to a name on a bus.
+    """
+    offenders: list[str] = []
+    for path in _module_files():
+        for imported in _imports(path):
+            if imported.startswith("hades.contexts.knowledge"):
+                offenders.append(f"{path.name} imports {imported}")
+    assert not offenders, "Research must reach Knowledge only through domain events: " + "; ".join(
+        offenders
+    )
+
+
+def test_knowledge_does_not_import_research_either() -> None:
+    """And symmetrically. The memory subscribes to event *names*; it has no
+    compile-time knowledge that a Research Lab exists at all."""
+    import hades.contexts.knowledge as knowledge_pkg
+
+    root = Path(knowledge_pkg.__file__).parent
+    offenders = [
+        f"{path.name} imports {imported}"
+        for path in sorted(root.rglob("*.py"))
+        for imported in _imports(path)
+        if imported.startswith("hades.contexts.research")
+    ]
+    assert not offenders, "Knowledge must not depend on Research: " + "; ".join(offenders)
 
 
 def test_research_domain_events_are_facts_not_instructions() -> None:
     """Sanity: the promotion event carries a decision, never an order payload."""
-    from hades.contexts.research.domain.events import StrategyPromoted
+    from hades.contexts.research.domain.events import ResearchStrategyPromoted
     from hades.contexts.research.domain.models import (
         CandidateKind,
         PromotionDecision,
@@ -67,7 +106,7 @@ def test_research_domain_events_are_facts_not_instructions() -> None:
         stage=ValidationStage.SHADOW,
         manual_approved=True,
     )
-    event = StrategyPromoted(aggregate_id=new_id(), decision=decision)
+    event = ResearchStrategyPromoted(aggregate_id=new_id(), decision=decision)
     payload = event.to_envelope()["payload"]
     # No order/size/mode fields — it is a governance fact only.
     assert "order" not in payload

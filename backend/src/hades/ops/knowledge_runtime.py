@@ -330,6 +330,42 @@ class KnowledgeRuntime:
             Verification.SIMULATED,
             SubjectType.STRATEGY,
         ),
+        "ReplayCompleted": (
+            KnowledgeSource.RESEARCH_LAB,
+            KnowledgeKind.SIMULATION,
+            Verification.SIMULATED,
+            SubjectType.PLATFORM,
+        ),
+        # Comparisons and promotion decisions are findings too — arguably the
+        # most valuable ones, because they are the lab saying which of its own
+        # results it believes. Leaving them unrecorded meant the memory held the
+        # experiments but not the conclusions drawn from them.
+        "StrategyCompared": (
+            KnowledgeSource.RESEARCH_LAB,
+            KnowledgeKind.EXPERIMENT,
+            Verification.SIMULATED,
+            SubjectType.STRATEGY,
+        ),
+        "ModelCompared": (
+            KnowledgeSource.RESEARCH_LAB,
+            KnowledgeKind.EXPERIMENT,
+            Verification.SIMULATED,
+            SubjectType.MODEL,
+        ),
+        # A promotion decision is governance, not deployment: the event says a
+        # human cleared a bar, and nothing is deployed by recording it.
+        "ResearchStrategyPromoted": (
+            KnowledgeSource.RESEARCH_LAB,
+            KnowledgeKind.EXPERIMENT,
+            Verification.SIMULATED,
+            SubjectType.STRATEGY,
+        ),
+        "PromotionRejected": (
+            KnowledgeSource.RESEARCH_LAB,
+            KnowledgeKind.EXPERIMENT,
+            Verification.SIMULATED,
+            SubjectType.STRATEGY,
+        ),
         # Executed operations — settled reality. Paper fills are simulated, but
         # the price path they settled against was the real market, so a closed
         # paper trade is ground truth about the market's behaviour.

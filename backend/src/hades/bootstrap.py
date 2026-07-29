@@ -80,9 +80,9 @@ from hades.contexts.research.domain.events import (
     PromotionRejected,
     ReplayCompleted,
     ResearchReportGenerated,
+    ResearchStrategyPromoted,
     ShadowStrategyUpdated,
     StrategyCompared,
-    StrategyPromoted,
     WalkForwardCompleted,
 )
 from hades.contexts.risk.domain.events import (
@@ -127,10 +127,8 @@ from hades.contexts.strategy.domain.events import (
     StrategyDisabled,
     StrategyError,
     StrategyLoaded,
+    StrategyPromoted,
     WeightUpdated,
-)
-from hades.contexts.strategy.domain.events import (
-    StrategyPromoted as StrategyEnginePromoted,
 )
 from hades.shared_kernel.analytics import ClickHouseProvider
 from hades.shared_kernel.cache import RedisProvider
@@ -281,7 +279,7 @@ def _build_registry() -> EventRegistry:
         StrategyCompared,
         FeatureProposed,
         CandidateProposed,
-        StrategyPromoted,
+        ResearchStrategyPromoted,
         PromotionRejected,
         ResearchReportGenerated,
         # Strategy Engine events (signals + ensemble; never a trade instruction).
@@ -289,7 +287,7 @@ def _build_registry() -> EventRegistry:
         StrategyDisabled,
         StrategyError,
         ShadowActivated,
-        StrategyEnginePromoted,
+        StrategyPromoted,
         SignalGenerated,
         SignalRejected,
         WeightUpdated,

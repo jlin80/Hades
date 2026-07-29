@@ -21,7 +21,7 @@ Companion documents: the living reference [`../hades.md`](../hades.md), the arch
 | | |
 |---|---|
 | Overall posture | **READY (paper) · NOT-LIVE by construction** |
-| Backend health | **593 tests passing**, `mypy --strict` clean (433 files), `ruff` clean (0 findings), suite runs **warnings-as-errors** |
+| Backend health | **629 tests passing**, `mypy --strict` clean (435 files), `ruff` clean (0 findings), suite runs **warnings-as-errors** |
 | Trading mode | Paper only; live hard-gated (env gate × 2 + readiness checklist + explicit confirm + authenticated operator) and unbuildable (no live adapters) |
 | Deployment | Turnkey: `git clone → configure .env → docker compose up -d` (schema auto-migrated) |
 | Codebase | 19 bounded contexts · 60 tables / 10 migrations · React dashboard · Docker/Compose · Prometheus/Grafana |
@@ -149,6 +149,32 @@ Phase 1 introduced the `knowledge` bounded context and closed it.
 and proven end-to-end in tests, but the platform must still open and close real trades to
 accumulate both classes. Generating those first positives without asking the committee to
 decide before it can know is **Phase 2**, and must not be confused with lowering thresholds.
+
+## 7b. Closed in Phase 2 — Research as the knowledge producer (2026-07-28)
+
+The Research Lab — internal *and* the external repository — now feeds permanent memory, and
+the connection is nothing but domain events.
+
+| Was | Now |
+|---|---|
+| The memory recorded experiments but not the lab's **conclusions** — comparisons and promotion decisions went unrecorded | All absorbed, each under its own provenance |
+| The **Replay Engine** had no caller anywhere and `ReplayCompleted` was registered but never published | `run_replay()` exists and publishes; a study that could not be run produced no knowledge |
+| `contexts/research` and `contexts/strategy` **both defined `StrategyPromoted`**. The bus routes on the class name, so they collided on one key; under Redis a lab promotion was rebuilt as a strategy-engine promotion and audited as one. Nothing raised | Renamed `ResearchStrategyPromoted`; a scan across every `domain/events.py` now fails the build on any collision |
+| The external lab had **no way to hand anything over** | `hades.knowledge/v1` — a checksummed JSON bundle, pull-based, fixture-tested in both repositories |
+
+**The trust boundary.** Knowledge feeds the AI Committee's training ledger, so the inbox does
+not believe its input. An external bundle cannot declare its verification (the field does not
+exist; declaring it is a rejection), cannot claim a platform source such as `paper_trading` or
+`executed_trade`, and **cannot express a lesson at all** — lessons are minted only by the
+Decision Journal settling a real trade. The worst a hostile file achieves is inserting
+clearly-labelled simulated observations.
+
+Isolation is unchanged and still AST-verified: Research imports no `execution`, `risk` or
+`portfolio` — and now no `knowledge` either, in both directions.
+
+**Still open:** the *candidate* (model) bridge remains one-sided and incompatible on format,
+model family and feature space. That is a product decision (audit §7.4), not an
+implementation gap.
 
 ## 8. Known limitations
 

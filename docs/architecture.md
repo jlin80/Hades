@@ -40,6 +40,7 @@ flowchart TD
 
     KN[["knowledge — permanent memory"]]:::memory
     FE & SE & WI & AI -.->|observations| KN
+    RES[["research lab (internal + external)"]] -.->|every finished study| KN
     RK -.->|TradeApproved: FREEZE features| KN
     PF -.->|PositionOpened / PositionClosed| KN
     KN ==>|LessonLearned| KF[Knowledge Feedback]
@@ -168,8 +169,18 @@ flowchart TD
   The event-name check found a real pre-existing defect on its first run: `OrderSubmitted` /
   `OrderFilled` / `OrderFailed` had never been registered in `bootstrap._build_registry`, so
   under the Redis transport they were silently discarded at every process boundary.
+- **Research ↔ Knowledge decoupling (verified, both directions):** Research is the platform's
+  official knowledge producer, and the connection is nothing but domain events. Neither
+  context imports the other. A direct call would put an ingestion failure on the lab's
+  critical path and hand a context that must never act a live handle on one that writes.
 - **Single trade authoriser (verified):** `TradeApproved` is constructed in exactly one
   place — `risk/application/manager.py`.
+- **No two events share a routing key (verified):** the bus routes on the class name, so two
+  contexts may not define an event with the same one. `contexts/research` and
+  `contexts/strategy` both defined `StrategyPromoted`; they collided on one key and the
+  registry silently kept whichever was registered last, so under Redis a lab promotion was
+  rebuilt as a strategy-engine promotion and audited as one. Now scanned across every
+  `domain/events.py` by `test_events_registry`.
 
 ## 4. Event map
 
@@ -191,6 +202,7 @@ idempotent).
 | **execution** | `OrderSubmitted`, `OrderFilled`, `OrderFailed`, `TradingModeChanged` | Portfolio, Notification, Audit |
 | **portfolio** | `PositionOpened`, `PositionUpdated`, `TrailingStopAdjusted`, `PositionClosed`, `CapitalCommitted`/`Released`, `PortfolioUpdated` | Risk Manager, Monitoring, Notification |
 | **knowledge** | `KnowledgeRecorded`, `KnowledgeRejected`, `DecisionRecorded`, **`LessonLearned`** | AI Committee (`LessonLearned` → `committee_outcomes`) |
+| **research** ⚠️ renamed | `ExperimentStarted/Finished`, `BacktestCompleted`, `WalkForwardCompleted`, `MonteCarloCompleted`, `ReplayCompleted`, `ShadowStrategyUpdated`, `ModelCompared`, `StrategyCompared`, `FeatureProposed`, `CandidateProposed`, **`ResearchStrategyPromoted`** (was `StrategyPromoted` — it collided with the Strategy Engine's event of the same name), `PromotionRejected`, `ResearchReportGenerated` | **Knowledge** (all of them), Audit |
 | **notification** | `NotificationRequested` (consumed only by the Notification Service) | Notification Service → Discord |
 
 Cross-cutting consumers: **Audit** records promotions, weight changes, kill-switch /
