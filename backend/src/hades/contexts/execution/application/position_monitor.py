@@ -50,6 +50,8 @@ from hades.contexts.portfolio.domain.events import (
     PositionUpdated,
     TrailingStopAdjusted,
 )
+from hades.contexts.strategy.domain.events import EnsembleSignalGenerated
+from hades.contexts.strategy.domain.models import SignalType
 from hades.shared_kernel.domain.events import DomainEvent
 from hades.shared_kernel.events import EventBus
 from hades.shared_kernel.logging import get_logger
@@ -105,13 +107,19 @@ class PositionMonitor:
         event_bus: EventBus,
         interval_seconds: float = 5.0,
         max_slippage_bps: int = 300,
+        honour_strategy_exits: bool = False,
     ) -> None:
         self._engine = engine
         self._oracle = price_oracle
         self._bus = event_bus
         self._interval = max(0.5, interval_seconds)
         self._max_slippage_bps = max_slippage_bps
+        # When the Strategy Engine gates risk, its SELL/EXIT verdicts are also
+        # honoured here. Off by default: the same flag turns both directions on,
+        # so an operator enabling the Strategy Engine gets one switch, not two.
+        self._honour_strategy_exits = honour_strategy_exits
         self._positions: dict[str, _Monitored] = {}
+        self._requested_exits: dict[str, str] = {}
         self._stop = asyncio.Event()
 
     @property
@@ -121,6 +129,39 @@ class PositionMonitor:
     def register(self, event_bus: EventBus) -> None:
         event_bus.subscribe(PositionOpened.__name__, self._on_opened)
         event_bus.subscribe(PositionClosed.__name__, self._on_closed)
+        if self._honour_strategy_exits:
+            event_bus.subscribe(EnsembleSignalGenerated.__name__, self._on_ensemble)
+
+    async def _on_ensemble(self, event: DomainEvent) -> None:
+        """A strategy SELL/EXIT on a token we hold becomes an exit request.
+
+        These verdicts used to die in the ensemble: the Strategy Engine could
+        emit them and no subscriber existed, so the only way out of a position
+        was the TP/SL envelope approved at entry.
+
+        The request is *recorded*, not acted on here. It is honoured on the next
+        tick, at a price the oracle actually returned, through the same
+        ``_exit`` path as every other exit — so a strategy cannot cause a sale at
+        a price nobody quoted, and the latch that prevents double-selling still
+        applies. And it can only ever close a position: there is no path from
+        this handler to opening one.
+        """
+        if not isinstance(event, EnsembleSignalGenerated):
+            return
+        decision = event.ensemble.decision
+        if decision not in (SignalType.SELL, SignalType.EXIT):
+            return
+        mint = str(event.token.mint)
+        for position in self._positions.values():
+            if str(position.token.mint) == mint and not position.exiting:
+                self._requested_exits[position.position_id] = f"strategy_{decision.value}"
+                _logger.info(
+                    "strategy_exit_requested",
+                    position_id=position.position_id,
+                    mint=mint,
+                    decision=decision.value,
+                    score=round(float(event.ensemble.score), 4),
+                )
 
     # -- lifecycle ------------------------------------------------------------
 
@@ -232,6 +273,7 @@ class PositionMonitor:
         return True
 
     async def _on_closed(self, event: DomainEvent) -> None:
+        self._requested_exits.pop(str(event.aggregate_id), None)
         if not isinstance(event, PositionClosed):
             return
         self._positions.pop(str(event.aggregate_id), None)
@@ -271,7 +313,13 @@ class PositionMonitor:
                 continue
             try:
                 await self._mark(position, price)
+                # The approved envelope is checked first. A strategy asking to
+                # leave must never override a stop-loss that has already been
+                # crossed: the stop is the loss the Risk Manager sized the trade
+                # around, and it should be the reason of record for the exit.
                 reason = self._breached(position, price)
+                if reason is None:
+                    reason = self._requested_exits.pop(position.position_id, None)
                 if reason is not None:
                     await self._exit(position, price, reason)
             except Exception as exc:  # one token must never stall the others

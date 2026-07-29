@@ -181,9 +181,7 @@ class KnowledgeCandidateEnricher:
         self._meter("found" if informative else "empty", started, enrichment)
         return EnrichedCandidate(context=context, enrichment=enrichment)
 
-    def _meter(
-        self, evidence: str, started: float, enrichment: CandidateEnrichment | None
-    ) -> None:
+    def _meter(self, evidence: str, started: float, enrichment: CandidateEnrichment | None) -> None:
         """Make the enrichment visible.
 
         ``evidence`` separates the three states that look alike from outside and
@@ -236,9 +234,7 @@ class KnowledgeCandidateEnricher:
     ) -> HistoricalPrior:
         """Outcomes of past decisions sharing one cohort key."""
         if not value:
-            return HistoricalPrior(
-                dimension=dimension, detail=f"{tag} unknown for this candidate"
-            )
+            return HistoricalPrior(dimension=dimension, detail=f"{tag} unknown for this candidate")
         cohort = [lesson for lesson in lessons if lesson.tags.get(tag) == value]
         return self._from_outcomes(dimension, value, cohort, f"prior trades sharing this {tag}")
 
@@ -513,9 +509,7 @@ class KnowledgeCandidateEnricher:
         answers its own question, counting only ground-truth cohorts (an
         observation is not an example of an outcome).
         """
-        samples = sum(
-            prior.samples for prior in priors if prior.basis is EvidenceBasis.OUTCOMES
-        )
+        samples = sum(prior.samples for prior in priors if prior.basis is EvidenceBasis.OUTCOMES)
         return round(clamp(samples / max(1, self._policy.support_target)), 4)
 
     @staticmethod

@@ -42,7 +42,8 @@ flowchart TD
     AI -->|CommitteePredictionGenerated| RK[Risk Manager]
     RK <-.->|"conviction veto? → grant (fixed $, budgeted)"| XP[["exploration — cold start only"]]:::explore
     AI -->|CommitteePredictionGenerated| ST[Strategy Engine]
-    ST -.->|EnsembleSignalGenerated| GAP1[["✗ no subscriber"]]:::broken
+    ST -->|EnsembleSignalGenerated| FC
+    ST -->|SELL / EXIT consensus| PM
     RK -->|TradeApproved| EX[Execution Engine]
     RK -.->|TradeRejected| NO[(no trade)]
     EX -->|OrderFilled → PositionOpened| PF[Portfolio]
@@ -80,7 +81,10 @@ flowchart TD
   nothing, is off by default, and ends by itself — see §1a.
 - **Remember (green):** Knowledge. Records from every producer; joins each decision with its
   realised outcome; **cannot act** — see §3a.
-- **Broken (dashed red):** the Strategy Engine's ensemble output still has no consumer.
+- **The Strategy Engine now decides** (`STRATEGY_GATE_RISK=true`): its ensemble may **veto**
+  an entry through `EnsembleConsensusPolicy` and **request an exit** on a token already held.
+  Both directions only ever reduce exposure — it can never create an approval or open a
+  position, and `TradeApproved` is still built in exactly one place. See §1b.
 
 ### The learning loop (closed in Phase 1)
 
@@ -167,6 +171,25 @@ The dependency is a narrow port the **Risk Manager** declares (`ExplorationPort`
 Risk's own `ExplorationGrant`), satisfied by an adapter at Risk's edge. Exploration in turn
 declares its own read port onto Knowledge's *domain*. The arrows run Risk → Exploration →
 Knowledge; there is no cycle.
+
+### 1b. The Strategy Engine's two powers (2026-07-29)
+
+`gate_risk` was a flag read only for logs while fifteen strategies published into a void. It is
+now the single switch for both directions, and three properties make it safe:
+
+1. **Veto only, never approve.** A second voice that could authorise would end "the Risk
+   Manager is the sole authoriser". One that can only refuse is strictly conservative: with the
+   gate on, the set of approved trades can only shrink.
+2. **Silence is not dissent.** `ensemble_participating == 0` passes the policy. At cold start
+   no strategy has an opinion, and reading that as a veto would halt the platform while
+   attaching a sensible-looking reason to every rejection.
+3. **CONVICTION tier, so exploration may waive it.** Exploration exists to sample cohorts the
+   platform has no evidence about; strategies with no history have no opinion worth blocking
+   that. It could never waive a SAFETY rule.
+
+Exits: a SELL/EXIT consensus becomes a request the Position Monitor honours on its next priced
+tick, through the same `_exit` path as every other exit — so a strategy cannot cause a sale at
+a price nobody quoted. A breached stop-loss still wins the reason of record.
 
 ### Contexts with no wiring
 

@@ -84,6 +84,59 @@ class MinConfidencePolicy:
         return _ok(self.name)
 
 
+class EnsembleConsensusPolicy:
+    """The Strategy Engine's fused opinion, as a veto on entries.
+
+    For most of this platform's life the Strategy Engine computed into nothing:
+    fifteen strategies, a weighted ensemble and a dynamic weight engine all
+    published ``EnsembleSignalGenerated``, and no subscriber existed. The audit
+    catalogued it as the largest piece of dead machinery in the codebase.
+
+    This is where it starts to matter, and the direction is deliberate: the
+    ensemble may **block** an entry, never create one. The Risk Manager remains
+    the sole authoriser; adding a second voice that could *approve* would end
+    that, whereas a second voice that can only refuse is strictly conservative —
+    with this policy on, the set of approved trades can only shrink.
+
+    Two things it refuses to do:
+
+    * **Treat silence as dissent.** ``ensemble_participating == 0`` means no
+      strategy has spoken for this token. At cold start that is the normal case,
+      and reading it as a veto would silently halt the platform while looking
+      like ordinary caution.
+    * **Outrank safety.** This lives in the CONVICTION tier, so an exploration
+      grant may waive it. That is intentional: exploration exists to sample
+      cohorts the platform has no evidence about, and strategies with no history
+      have no opinion worth letting block that. It could never waive a SAFETY
+      rule, and this is not one.
+    """
+
+    name = "ensemble_consensus"
+
+    def __init__(self, min_score: float) -> None:
+        self._min_score = min_score
+
+    def evaluate(
+        self, candidate: RiskCandidate, state: PortfolioRiskState, proposed_notional_usd: float
+    ) -> PolicyOutcome:
+        if candidate.ensemble_participating <= 0:
+            return _ok(self.name)
+        if candidate.ensemble_decision != "buy_signal":
+            return _veto(
+                self.name,
+                RiskRejectReason.ENSEMBLE_DISAGREES,
+                f"strategy ensemble says {candidate.ensemble_decision} "
+                f"({candidate.ensemble_participating} strategies)",
+            )
+        if candidate.ensemble_score < self._min_score:
+            return _veto(
+                self.name,
+                RiskRejectReason.ENSEMBLE_DISAGREES,
+                f"ensemble conviction {candidate.ensemble_score:.2f} < {self._min_score:.2f}",
+            )
+        return _ok(self.name)
+
+
 class SecurityPolicy:
     name = "security"
 

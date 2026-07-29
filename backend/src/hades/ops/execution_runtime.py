@@ -121,6 +121,9 @@ class ExecutionRuntime:
             event_bus=self._c.event_bus,
             interval_seconds=e.position_monitor_interval_seconds,
             max_slippage_bps=e.max_slippage_bps,
+            # One switch turns the Strategy Engine on in both directions: it may
+            # veto an entry in the Risk Manager, and request an exit here.
+            honour_strategy_exits=self._c.settings.strategy.gate_risk,
         )
 
     async def _resolve_mode(self) -> str:

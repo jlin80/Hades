@@ -772,10 +772,22 @@ class StrategySettings(_Section):
     ensemble fusion and lets operators enable/disable strategies and pass
     per-strategy parameters entirely from configuration (never by editing code).
 
-    ``gate_risk`` is a forward-looking flag: when the ensemble is wired to gate the
-    Risk Manager it is honoured there. It defaults off so the existing
-    committee->risk path is unchanged — the engine is advisory until explicitly
-    promoted, exactly like every other capability in Hades.
+    ``gate_risk`` is no longer forward-looking: it is the single switch that
+    makes the Strategy Engine *decide*. With it on, the ensemble can
+
+      * **veto an entry** the Risk Manager would otherwise approve
+        (``EnsembleConsensusPolicy``, in the conviction tier), and
+      * **request an exit** on a token already held, honoured by the Position
+        Monitor on its next priced tick.
+
+    Both directions only ever reduce exposure. The ensemble can never create an
+    approval or open a position: the Risk Manager remains the sole authoriser and
+    ``TradeApproved`` is still constructed in exactly one place.
+
+    It defaults off. Turning it on changes what the platform trades, so it is a
+    deliberate act — and note that a silent roster is not a dissenting one: with
+    no strategy participating the policy passes, because reading silence as a
+    veto would halt the platform at cold start while looking like caution.
     """
 
     model_config = SettingsConfigDict(env_prefix="STRATEGY_", extra="ignore", env_file=".env")
@@ -797,8 +809,12 @@ class StrategySettings(_Section):
     # JSON object of per-strategy parameter overrides:
     #   {"momentum_breakout": {"sensitivity": 1.2}, "launch_detection": {...}}
     params_json: str = Field(default="", alias="STRATEGY_PARAMS")
-    # Forward-looking: let the ensemble gate the Risk Manager (default off).
+    # The single switch that lets the ensemble veto entries and request exits.
     gate_risk: bool = False
+    #: Minimum ensemble conviction in [-1, 1] for a BUY consensus to stand when
+    #: ``gate_risk`` is on. 0.0 means "any positive net conviction will do"; the
+    #: deadband above already filters noise around zero.
+    gate_min_ensemble_score: float = 0.0
     status_interval_seconds: float = 5.0
 
     @property

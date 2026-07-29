@@ -66,6 +66,7 @@ class RiskRejectReason(StrEnum):
     DEVELOPER_RISKY = "developer_risky"
     WALLET_SUSPICIOUS = "wallet_suspicious"
     LIQUIDITY_INSUFFICIENT = "liquidity_insufficient"
+    ENSEMBLE_DISAGREES = "ensemble_disagrees"
     # Portfolio-level limits.
     MAX_POSITIONS = "max_positions"
     INSUFFICIENT_CAPITAL = "insufficient_capital"
@@ -394,6 +395,14 @@ class RiskCandidate(ValueObject):
     wallet_risk_score: float = 50.0
     liquidity_score: float = 50.0
     liquidity_usd: float = 0.0
+    # Strategy Engine consensus, when the roster has actually spoken for this
+    # token. ``ensemble_participating == 0`` means "no opinion recorded", which
+    # is different from "the strategies dislike it" and must never be read as a
+    # veto — an absent opinion is not a negative one.
+    ensemble_decision: str = "unknown"
+    ensemble_score: float = 0.0
+    ensemble_confidence: float = 0.0
+    ensemble_participating: int = 0
     # Concentration tags.
     strategy: str = "default"
     developer: str | None = None
@@ -616,6 +625,12 @@ class RiskConfig(ValueObject):
     min_developer_score: float = 40.0
     max_wallet_risk: float = 70.0
     min_liquidity_usd: float = 5_000.0
+    #: Whether the Strategy Engine's ensemble may veto an entry. Off by default:
+    #: turning it on is a deliberate change of posture, and the flag existed for
+    #: a long time reading nothing at all.
+    gate_on_ensemble: bool = False
+    #: Minimum ensemble conviction, in [-1, 1], for a BUY consensus to stand.
+    min_ensemble_score: float = 0.0
 
 
 class RiskControlState(ValueObject):

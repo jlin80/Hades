@@ -172,8 +172,7 @@ class Worker(ServiceProcess):
             knowledge="running" if self._knowledge else "off",
             exploration=(
                 "granting"
-                if self._exploration is not None
-                and self._container.settings.exploration.enabled
+                if self._exploration is not None and self._container.settings.exploration.enabled
                 else "off"
             ),
         )

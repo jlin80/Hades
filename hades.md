@@ -17,7 +17,7 @@
 | **Current phase** | **Phase 4 — Exploration Mode: the budgeted, self-terminating answer to the cold start (§6p)** |
 | **Version** | `0.10.0` |
 | **Trading** | Paper only. Live execution is hard-gated OFF (two switches), blocked by the Production Checklist (any failing required subsystem or an active Emergency Mode refuses the switch to LIVE), **and** — as of Stage 2 — the switch to LIVE additionally requires an authenticated operator (never the implicit `system` principal). The Execution Engine remains the *only* component that knows the mode; everything upstream is mode-agnostic. |
-| **Backend tests** | **704 passing** · `mypy --strict` clean (456 src files) · **`ruff` clean (0 findings)** · suite runs **warnings-as-errors** |
+| **Backend tests** | **728 passing** · `mypy --strict` clean (456 src files) · **`ruff` clean (0 findings)** · suite runs **warnings-as-errors** |
 | **Cold start** | **Resolvable and now addressed.** The learning loop is closed (§6m), the lab feeds it (§6n), the brain reads it (§6o), and a budgeted Exploration programme buys the first ground-truth samples and switches itself off when the memory has them (§6p). Exploration is **off by default** and waives only the AI Committee's conviction gates — never a safety rule, never the defence layer, never an allocation limit. |
 | **Deployment** | `docker compose up -d` is now a complete, no-manual-steps bring-up: a one-shot `migrate` service applies the schema to head before any app service starts. |
 
@@ -31,16 +31,9 @@
 > those phases built (Phase 3, §6o), and the deliberate bootstrap policy the audit asked for
 > is built (Phase 4, §6p).** What remains open:
 >
-> - **The Strategy Engine still has no consumer.** `EnsembleSignalGenerated` is published and
->   nobody subscribes. All fifteen strategies, the weighted ensemble and the dynamic weight
->   engine influence nothing; Risk consumes `CommitteePredictionGenerated` directly, and
->   `strategy.gate_risk` is read only for logs. **Decision pending: connect or freeze.**
 > - `contexts/scoring` and `contexts/wallet` have **no wiring anywhere** (§4's context list
 >   describes them as pipeline stages — they are not).
 > - The whole pipeline runs in the single `worker` process while `engine` sits idle.
-> - The Research Lab bridge is incompatible on format, model family *and* feature space at
->   once — see [`docs/RESEARCH_LAB_BRIDGE.md`](docs/RESEARCH_LAB_BRIDGE.md). **Decision
->   pending.**
 > - The event store is still in-memory (H1), so incidents remain hard to reconstruct.
 >
 > Closed in Phase 1 (§6m): the learning loop's write path, and promotions taking effect
@@ -2096,6 +2089,75 @@ misconfigured and no amount of waiting will produce a trade.
 
 ---
 
+## 6o. Two decisions, resolved (2026-07-29)
+
+The audit left two questions open for three sessions. Both are now answered in code.
+
+### The Strategy Engine decides — `gate_risk` reads as something
+
+Fifteen strategies, a weighted ensemble, a dynamic weight engine and a shadow lifecycle all
+published `EnsembleSignalGenerated`, and **no subscriber existed anywhere**. It was the
+largest piece of dead machinery in the codebase, and `gate_risk` was a flag read only for
+logs.
+
+`gate_risk` is now the single switch that gives the ensemble two powers:
+
+* **Veto an entry** — `EnsembleConsensusPolicy`, appended to the Risk Manager's CONVICTION
+  tier. If the roster's consensus is not BUY, or its conviction is below
+  `STRATEGY_GATE_MIN_ENSEMBLE_SCORE`, the candidate is rejected as `ENSEMBLE_DISAGREES`.
+* **Request an exit** — a SELL/EXIT consensus on a token already held becomes an exit request
+  the Position Monitor honours on its next priced tick. Those verdicts used to die in the
+  ensemble; the only way out of a position was the TP/SL envelope approved at entry.
+
+**Both directions only ever reduce exposure.** The ensemble cannot create an approval, cannot
+open a position and cannot size anything; `TradeApproved` is still constructed in exactly one
+place. A second voice that could *approve* would end "the Risk Manager is the sole
+authoriser" — one that can only refuse is strictly conservative, and with the gate on the set
+of approved trades can only shrink.
+
+Three design points that are load-bearing rather than stylistic:
+
+1. **A silent roster is not a dissenting one.** With `ensemble_participating == 0` the policy
+   passes. At cold start no strategy has an opinion about anything, and reading silence as a
+   veto would halt the platform while attaching a perfectly sensible reason to every
+   rejection.
+2. **CONVICTION, not SAFETY.** An exploration grant may waive it. Exploration exists to
+   sample cohorts the platform has no evidence about, and strategies with no history have no
+   opinion worth letting block that. It could never waive a SAFETY rule, and a strategy
+   verdict is not one.
+3. **The stop-loss still wins.** When a strategy exit and a breached stop fire on the same
+   tick, the stop is the reason of record — it is the loss the trade was sized around, and a
+   strategy silently relabelling it would corrupt every statistic about how the platform
+   loses money.
+
+The verdict travels the same way every other upstream fact does: `EventDrivenRiskFacts`
+subscribes to the event, the `RiskContextBuilder` puts it on the candidate. No new I/O.
+
+### The model bridge — option O1
+
+The lab may now export a **deployable model**, and only one kind: a transparent logistic
+weight set over Core's own `FeatureCatalog`.
+
+`hades_research.candidate_export` refuses a tree ensemble **by type**, not by convention —
+and the fakes in its test suite deliberately carry a `coef_`, because duck-typing would let
+them through and produce a bundle that is confidently wrong. The refusal message says what to
+do instead, since a dead end with no exit is how people route around a rule: keep the tree in
+the lab as a *hypothesis generator* and export its finding as knowledge.
+
+The subtle constraint is the feature names. A coefficient keyed by a name Core does not
+produce indexes nothing — the model would load, score every token with that input treated as
+neutral, and be a quietly different model from the one that was validated. Nothing would
+raise. So names are checked against Core's catalogue (mirrored, not imported: importing would
+couple the two release cycles and undo the file-based bridge) and an unknown one is a
+rejection at export time.
+
+**The candidate fixtures are now generated by that exporter** and committed byte-identically
+in both repositories. They used to be hand-written to the contract while the docs claimed
+otherwise — that gap is closed, and it is documented in
+[`docs/RESEARCH_LAB_BRIDGE.md`](docs/RESEARCH_LAB_BRIDGE.md).
+
+---
+
 ## 7. Testing
 
 `backend/tests` (379 tests, all green; `mypy --strict` clean; `ruff` clean; suite runs
@@ -2302,6 +2364,19 @@ warnings-as-errors):
   the programme buy rug pulls); its events are registered on the bus (an unregistered event is
   silently dropped at the Redis boundary); permanent memory records the programme; and an
   external bundle cannot claim `exploration` as its source.
+
+- 2026-07-29 — the two open decisions, **+24 tests**: `test_strategy_gate` (a **silent roster
+  is not a dissenting one**; anything but BUY vetoes; a BUY below the conviction floor is
+  vetoed; the policy has no field that could express an approval; the gate is **off by
+  default**; turning it on lands the policy in CONVICTION and **not** SAFETY, so exploration
+  can still waive it; the cheap gates still run first; the verdict reaches the candidate over
+  a real bus), `test_position_monitor` extended (a strategy SELL/EXIT exits a held position; a
+  **BUY or IGNORE never exits**; **the stop-loss still wins** when both fire on one tick;
+  nothing happens with the gate off, for a token we do not hold, or on a redelivered signal),
+  and in the lab `test_candidate_export` (**a tree model can never be exported** — refused by
+  type, with fakes that deliberately carry a `coef_`; the refusal says what to do instead; a
+  feature Core does not produce is refused; every catalogue name is accepted; the meta-model's
+  three heads; lab-only metrics travel as evidence; the bundle declares no status of its own).
 
 Everything is testable because every dependency is a port; in-memory adapters
 back the tests, real adapters back production. The frontend passes `tsc` and a

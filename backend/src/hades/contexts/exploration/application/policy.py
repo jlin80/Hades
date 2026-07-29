@@ -248,14 +248,12 @@ class ExplorationPolicy:
         if spend.week_trades >= budget.max_trades_per_week:
             return (
                 ExplorationDecline.WEEKLY_TRADES,
-                f"weekly trade cap reached: {spend.week_trades} "
-                f">= {budget.max_trades_per_week}",
+                f"weekly trade cap reached: {spend.week_trades} >= {budget.max_trades_per_week}",
             )
         if spend.day_usd + size > budget.daily_usd:
             return (
                 ExplorationDecline.DAILY_BUDGET,
-                f"daily budget spent: ${spend.day_usd:.2f} + ${size:.2f} "
-                f"> ${budget.daily_usd:.2f}",
+                f"daily budget spent: ${spend.day_usd:.2f} + ${size:.2f} > ${budget.daily_usd:.2f}",
             )
         if spend.day_trades >= budget.max_trades_per_day:
             return (

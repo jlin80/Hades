@@ -322,3 +322,149 @@ async def test_a_zero_entry_price_is_refused_rather_than_dividing_by_it() -> Non
     await _open(bus, entry=Decimal(0))
 
     assert monitor.tracked == 0
+
+
+# --- strategy-requested exits (gate_risk) -------------------------------------
+#
+# The Strategy Engine can emit SELL/EXIT, and until the gate was wired those
+# verdicts died in the ensemble: the only way out of a position was the TP/SL
+# envelope approved at entry. These pin the behaviour and, more importantly, its
+# limits.
+
+
+def _build_gated(
+    price: Decimal | None, *, fill_price: Decimal = Decimal(1)
+) -> tuple[PositionMonitor, InMemoryEventBus, _RecordingExecutor]:
+    bus = InMemoryEventBus()
+
+    async def mode_provider() -> str:
+        return "paper"
+
+    executor = _RecordingExecutor(fill_price)
+    engine = ExecutionEngine(
+        executors={"paper": executor},
+        mode_provider=mode_provider,
+        order_manager=OrderManager(),
+        transaction_manager=TransactionManager(),
+        event_bus=bus,
+        notifier=NotificationPublisher(bus),
+    )
+    monitor = PositionMonitor(
+        engine=engine,
+        price_oracle=_StubOracle(price),
+        event_bus=bus,
+        interval_seconds=0.5,
+        honour_strategy_exits=True,
+    )
+    monitor.register(bus)
+    return monitor, bus, executor
+
+
+async def _ensemble(bus: InMemoryEventBus, decision: object) -> None:
+    from hades.contexts.strategy.domain.events import EnsembleSignalGenerated
+    from hades.contexts.strategy.domain.models import EnsembleSignal
+
+    token = _token()
+    await bus.publish(
+        EnsembleSignalGenerated(
+            aggregate_id=new_id(),
+            token=token,
+            ensemble=EnsembleSignal(token=token, decision=decision, score=-0.6, participating=8),
+        )
+    )
+
+
+async def test_a_strategy_sell_exits_a_held_position() -> None:
+    from hades.contexts.strategy.domain.models import SignalType
+
+    monitor, bus, executor = _build_gated(Decimal("1.05"))
+    await _open(bus)
+
+    await _ensemble(bus, SignalType.SELL)
+    await monitor.tick()
+
+    assert len(executor.calls) == 1
+    assert executor.calls[0].side is OrderSide.SELL
+    assert executor.calls[0].tags[TAG_EXIT_REASON] == "strategy_sell_signal"
+
+
+async def test_a_strategy_exit_signal_also_exits() -> None:
+    from hades.contexts.strategy.domain.models import SignalType
+
+    monitor, bus, executor = _build_gated(Decimal("1.05"))
+    await _open(bus)
+
+    await _ensemble(bus, SignalType.EXIT)
+    await monitor.tick()
+
+    assert len(executor.calls) == 1
+
+
+async def test_a_strategy_buy_or_ignore_never_exits() -> None:
+    """The asymmetry, pinned: this path can only ever close a position."""
+    from hades.contexts.strategy.domain.models import SignalType
+
+    monitor, bus, executor = _build_gated(Decimal("1.05"))
+    await _open(bus)
+
+    await _ensemble(bus, SignalType.BUY)
+    await _ensemble(bus, SignalType.IGNORE)
+    await monitor.tick()
+
+    assert executor.calls == []
+
+
+async def test_the_stop_loss_still_wins_over_a_strategy_exit() -> None:
+    """The stop is the loss the Risk Manager sized the trade around, so it must
+    stay the reason of record when both fire on the same tick. A strategy exit
+    silently relabelling a stop-loss would corrupt every downstream statistic
+    about how the platform loses money."""
+    from hades.contexts.strategy.domain.models import SignalType
+
+    monitor, bus, executor = _build_gated(Decimal("0.70"))  # -30%, past a 20% stop
+    await _open(bus)
+
+    await _ensemble(bus, SignalType.SELL)
+    await monitor.tick()
+
+    assert len(executor.calls) == 1
+    assert executor.calls[0].tags[TAG_EXIT_REASON] == EXIT_STOP_LOSS
+
+
+async def test_a_strategy_exit_is_ignored_when_the_gate_is_off() -> None:
+    """Default posture: the Strategy Engine stays advisory."""
+    from hades.contexts.strategy.domain.models import SignalType
+
+    monitor, bus, executor = _build(Decimal("1.05"))  # gate off
+    await _open(bus)
+
+    await _ensemble(bus, SignalType.SELL)
+    await monitor.tick()
+
+    assert executor.calls == []
+
+
+async def test_an_exit_request_for_a_token_we_do_not_hold_does_nothing() -> None:
+    from hades.contexts.strategy.domain.models import SignalType
+
+    monitor, bus, executor = _build_gated(Decimal("1.05"))
+
+    await _ensemble(bus, SignalType.SELL)
+    await monitor.tick()
+
+    assert executor.calls == []
+
+
+async def test_a_repeated_strategy_sell_does_not_sell_twice() -> None:
+    """At-least-once delivery must not double-sell a position."""
+    from hades.contexts.strategy.domain.models import SignalType
+
+    monitor, bus, executor = _build_gated(Decimal("1.05"))
+    await _open(bus)
+
+    await _ensemble(bus, SignalType.SELL)
+    await _ensemble(bus, SignalType.SELL)
+    await monitor.tick()
+    await monitor.tick()
+
+    assert len(executor.calls) == 1

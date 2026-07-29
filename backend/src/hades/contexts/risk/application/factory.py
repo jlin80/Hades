@@ -18,6 +18,7 @@ from hades.contexts.risk.application.policies import (
     CorrelationPolicy,
     DeveloperPolicy,
     DrawdownPolicy,
+    EnsembleConsensusPolicy,
     ExposurePolicy,
     LiquidityPolicy,
     MaxPositionsPolicy,
@@ -109,6 +110,8 @@ def risk_config_from_settings(settings: Settings) -> RiskConfig:
         min_developer_score=r.min_developer_score,
         max_wallet_risk=r.max_wallet_risk,
         min_liquidity_usd=r.min_liquidity_usd,
+        gate_on_ensemble=settings.strategy.gate_risk,
+        min_ensemble_score=settings.strategy.gate_min_ensemble_score,
     )
 
 
@@ -153,6 +156,11 @@ def build_risk_manager(
         MinProbabilityPolicy(config.sizing),
         MinConfidencePolicy(config.sizing),
     )
+    if config.gate_on_ensemble:
+        # Appended rather than inserted: probability and confidence are the
+        # cheaper checks and stay first, so the common rejection still costs one
+        # comparison. Conviction tier, so exploration may waive it.
+        conviction = (*conviction, EnsembleConsensusPolicy(config.min_ensemble_score))
     allocation: tuple[RiskPolicy, ...] = (
         MaxPositionsPolicy(config.rates),
         CapitalPolicy(),

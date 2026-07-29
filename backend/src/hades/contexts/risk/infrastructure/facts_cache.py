@@ -35,6 +35,7 @@ from typing import Any
 
 from hades.contexts.intelligence.domain.events import WalletIntelligenceComputed
 from hades.contexts.security.domain.events import SecurityScoreComputed
+from hades.contexts.strategy.domain.events import EnsembleSignalGenerated
 from hades.shared_kernel.domain.events import DomainEvent
 from hades.shared_kernel.events import EventBus
 from hades.shared_kernel.logging import get_logger
@@ -55,6 +56,9 @@ class EventDrivenRiskFacts:
     def register(self, event_bus: EventBus) -> None:
         event_bus.subscribe(SecurityScoreComputed.__name__, self.on_security)
         event_bus.subscribe(WalletIntelligenceComputed.__name__, self.on_intelligence)
+        # The Strategy Engine's fused verdict. It arrives on the same bus and the
+        # same token, just from a context that until now had no listener at all.
+        event_bus.subscribe(EnsembleSignalGenerated.__name__, self.on_ensemble)
 
     @property
     def tracked(self) -> int:
@@ -83,6 +87,12 @@ class EventDrivenRiskFacts:
             _logger.warning(
                 "risk_facts_security_failed", mint=str(event.token.mint), error=str(exc)
             )
+
+    async def on_ensemble(self, event: DomainEvent) -> None:
+        """Remember what the strategy roster concluded about a token."""
+        if not isinstance(event, EnsembleSignalGenerated):
+            return
+        self._merge(str(event.token.mint), _ensemble_facts(event))
 
     async def on_intelligence(self, event: DomainEvent) -> None:
         if not isinstance(event, WalletIntelligenceComputed):
@@ -146,3 +156,20 @@ def _intelligence_facts(event: WalletIntelligenceComputed) -> dict[str, FactValu
 def _sub_facts(facts: dict[str, Any], analyzer: str) -> dict[str, Any]:
     value = facts.get(analyzer)
     return value if isinstance(value, dict) else {}
+
+
+def _ensemble_facts(event: EnsembleSignalGenerated) -> dict[str, FactValue]:
+    """Flatten the ensemble verdict into the fact vocabulary the builder reads.
+
+    ``ensemble_participating`` is the load-bearing one: it distinguishes "the
+    strategies looked and disliked it" from "no strategy has an opinion", and a
+    policy that confuses the two would halt the platform at cold start while
+    looking like ordinary caution.
+    """
+    ensemble = event.ensemble
+    return {
+        "ensemble_decision": ensemble.decision.value,
+        "ensemble_score": float(ensemble.score),
+        "ensemble_confidence": float(ensemble.confidence),
+        "ensemble_participating": float(ensemble.participating),
+    }

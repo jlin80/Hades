@@ -43,6 +43,7 @@ from hades.shared_kernel.persistence.models.tokens import Token
 
 _logger = get_logger("committee.context_builder")
 
+
 @dataclass(frozen=True)
 class _SecurityRead:
     """The security verdict as this builder reads it, defaults included.

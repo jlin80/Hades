@@ -124,9 +124,7 @@ class ExplorationService:
         now = datetime.now(UTC)
         if not self._cfg.enabled:
             return self._record(
-                self._policy.decide(
-                    candidate, EvidenceStatus(), ExplorationSpend(), now=now
-                )
+                self._policy.decide(candidate, EvidenceStatus(), ExplorationSpend(), now=now)
             )
         if self._completed:
             # Latched. Short-circuited before any I/O: once the programme is over

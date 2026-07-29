@@ -48,9 +48,7 @@ def history_feature_values(enrichment: CandidateEnrichment | None) -> dict[str, 
         values[f"history.{name}.rate"] = clamp(prior.positive_rate)
         values[f"history.{name}.strength"] = clamp(prior.strength)
         if prior.basis is EvidenceBasis.OUTCOMES:
-            values[f"history.{name}.roi"] = clamp(
-                0.5 + prior.avg_roi / (2.0 * _ROI_SATURATION)
-            )
+            values[f"history.{name}.roi"] = clamp(0.5 + prior.avg_roi / (2.0 * _ROI_SATURATION))
     return values
 
 

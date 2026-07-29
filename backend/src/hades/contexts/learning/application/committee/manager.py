@@ -135,9 +135,7 @@ class CommitteeManager:
         correlation = new_id()
         try:
             vector = self._augment(candidate)
-            prediction = await self._run(
-                self._active, candidate, vector, correlation, shadow=False
-            )
+            prediction = await self._run(self._active, candidate, vector, correlation, shadow=False)
             for shadow in self._shadows:
                 try:
                     await self._run(shadow, candidate, vector, correlation, shadow=True)
