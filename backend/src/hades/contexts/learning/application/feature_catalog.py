@@ -374,6 +374,22 @@ class FeatureNormalizer:
     def __init__(self, catalog: FeatureCatalog) -> None:
         self._catalog = catalog
 
+    def normalize_values(self, raw_values: dict[str, float]) -> dict[str, float]:
+        """Normalise a bare ``{name: value}`` map through the same catalog.
+
+        The Candidate Enricher needs this: a lesson stores the *raw* vector that
+        was frozen at decision time, and comparing it to a live candidate has to
+        happen in the same normalised space the models see. Sharing this method
+        with :meth:`normalize` is what guarantees "the same space" stays true
+        when a spec changes.
+        """
+        out: dict[str, float] = {}
+        for spec in self._catalog.all():
+            if spec.name not in raw_values:
+                continue
+            out[spec.name] = self._apply(spec, raw_values[spec.name])
+        return out
+
     def normalize(self, features: FeatureSet) -> NormalizedVector:
         values: dict[str, float] = {}
         raw: dict[str, float] = {}

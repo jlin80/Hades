@@ -17,7 +17,7 @@
 | **Current phase** | **Phase 11 — Production Hardening, Stage 2 (final code-quality & deployment closure)** |
 | **Version** | `0.10.0` |
 | **Trading** | Paper only. Live execution is hard-gated OFF (two switches), blocked by the Production Checklist (any failing required subsystem or an active Emergency Mode refuses the switch to LIVE), **and** — as of Stage 2 — the switch to LIVE additionally requires an authenticated operator (never the implicit `system` principal). The Execution Engine remains the *only* component that knows the mode; everything upstream is mode-agnostic. |
-| **Backend tests** | **629 passing** · `mypy --strict` clean (435 src files) · **`ruff` clean (0 findings)** · suite runs **warnings-as-errors** |
+| **Backend tests** | **659 passing** · `mypy --strict` clean (439 src files) · **`ruff` clean (0 findings)** · suite runs **warnings-as-errors** |
 | **Deployment** | `docker compose up -d` is now a complete, no-manual-steps bring-up: a one-shot `migrate` service applies the schema to head before any app service starts. |
 
 > **⚠️ Architecture audit, 2026-07-28 — read before planning any new capability.**
@@ -26,7 +26,8 @@
 > the code sound and the **event graph incomplete**: three open circuits meant the platform
 > could not learn from its own trades, no matter how it was configured.
 >
-> **Two of the three are closed by Phase 1 (§6m).** What remains open:
+> **Two of the three are closed by Phase 1 (§6m), and the decision path now reads the memory
+> those phases built (Phase 3, §6o).** What remains open:
 >
 > - **The Strategy Engine still has no consumer.** `EnsembleSignalGenerated` is published and
 >   nobody subscribes. All fifteen strategies, the weighted ensemble and the dynamic weight
@@ -41,11 +42,17 @@
 > - The event store is still in-memory (H1), so incidents remain hard to reconstruct.
 >
 > Closed in Phase 1 (§6m): the learning loop's write path, and promotions taking effect
-> without a restart.
+> without a restart. Closed in Phase 3 (§6o): the loop's **read** path — the committee used to
+> judge every token as if the platform had never seen one, because nothing on the decision
+> path consulted permanent memory. A Candidate Enricher now sits between the context builder
+> and the committee, and no candidate can reach the brain without passing through it.
 >
 > **The ordering rule still holds: do not recalibrate thresholds before the platform is
 > demonstrably learning.** Lowering them earlier would have produced trades whose results
-> reached nothing, hiding the defect behind apparent activity.
+> reached nothing, hiding the defect behind apparent activity. Phase 3 changed nothing about
+> the thresholds: with an empty memory the enrichment is *exactly* neutral, so the committee
+> produces the number it produced before — the cold start is answered with knowledge or it is
+> not answered at all.
 
 Phase 1 established the architecture skeleton (bounded contexts, contracts,
 domain events, shared kernel). Phase 2 built the full platform the system runs on
@@ -767,10 +774,15 @@ VPS) and every output decomposes into legible per-feature contributions.
 
 ```
 scanner → features → security → intelligence → COMMITTEE
-     WalletIntelligenceComputed ─► [Decision Context Builder → Committee Manager]
+     WalletIntelligenceComputed ─► [Decision Context Builder → Candidate Enricher
+                                    → Committee Manager]
         → InferenceCompleted (×12) → CommitteeFinished → ConfidenceCalculated
         → PredictionGenerated → CommitteePredictionGenerated
 ```
+
+Since Phase 3 (§6o) the **Candidate Enricher** is a mandatory stage in that line: the manager
+accepts only an `EnrichedCandidate`, so no token is judged without the platform's own history
+of comparable tokens attached.
 
 The committee reacts to `WalletIntelligenceComputed` (the last analytical stage,
 fired for approved *and* rejected tokens). The **Decision Context Builder**
@@ -1735,6 +1747,137 @@ logged — a filesystem audit trail readable months later by someone without thi
 
 ---
 
+## 6o. The Candidate Enricher — no token is ever judged from scratch (Phase 3, 2026-07-28)
+
+Phase 1 gave Hades a memory. Phase 2 filled it. Phase 3 makes the brain **read** it.
+
+Until now the decision path never touched permanent memory. Every token arrived at the AI
+Committee as though the platform had never seen a token before: the specialists read a feature
+vector, the meta-model fused their opinions from a fixed bias, and everything Hades had lived
+through — every settled trade, every developer it had learned to distrust, every narrative that
+had never once worked — was absent from the calculation. The knowledge existed and *nothing
+consulted it*.
+
+That is the exact shape of defect the last audit kept finding: a component that is present,
+correct and unwired. It is also why the cold start looked like a threshold problem. It was
+not. The committee was not being too strict; it was being asked to judge in ignorance.
+
+### The rule
+
+**No candidate reaches the AI Committee unenriched**, and this is enforced structurally rather
+than by convention:
+
+```
+intelligence ─WalletIntelligenceComputed─► [context builder → CANDIDATE ENRICHER → committee]
+```
+
+`CommitteeManager.evaluate()` accepts one type — `EnrichedCandidate` — and there is no
+overload, no optional argument and no default that takes a bare `DecisionContext`. A caller
+that skipped the enricher cannot express the call. `CommitteeHandler` takes the enricher as a
+required constructor argument, so there is no path through the subscriber either. Both are
+pinned by tests.
+
+### The eleven dimensions
+
+For each candidate the Decision Context Builder establishes a `CandidateIdentity` — the cohort
+keys the memory is indexed by — from reads it already performs (the security assessment's
+per-analyzer facts, the wallet-intelligence snapshot, the token's metadata row). The enricher
+then asks the Knowledge Engine what happened last time, along **eleven** dimensions:
+
+| Dimension | Cohort | Basis |
+|---|---|---|
+| **developer** | settled trades tagged with this deployer | outcomes |
+| **wallets** | how much of this token's wallet crowd the memory already knows, and how it rates them | observations |
+| **clusters** | settled trades tagged with this dominant cluster | outcomes |
+| **narrative** | settled trades telling the same meme story | outcomes |
+| **launchpad** | settled trades from the same listing venue | outcomes |
+| **liquidity** | settled trades taken in a comparable depth band (log space) | outcomes |
+| **volatility** | settled trades taken in a comparable volatility band | outcomes |
+| **outcomes** | this exact token's own settled history | outcomes |
+| **strategies** | the record of the strategy behind comparable decisions | outcomes |
+| **holders** | settled trades on a similar holder structure | outcomes |
+| **patterns** | the *k* nearest past decisions in the models' own normalised space | outcomes |
+
+All eleven are always reported, including as "nothing recorded yet" — a dimension that
+silently disappears is one nobody notices is missing. The **patterns** dimension is the one
+that answers *"have we been here before?"* for a brand-new developer on a brand-new venue
+telling a story nobody has told; it needs no shared tag at all.
+
+`narrative` is classified by a transparent keyword map, never a model: a label that drifts
+would silently repartition every historical cohort, so today's candidates would be compared
+against a differently-defined past. Nothing matches ⇒ `None`. **A wrong cohort is worse than a
+missing one**, because nothing downstream can ever detect it.
+
+### How knowledge reaches the verdict — and how far it is allowed to
+
+Four rules, each present because the obvious implementation is dangerous:
+
+1. **An empty memory is exactly neutral.** With no evidence every prior has `strength` 0, the
+   fused `prior_log_odds` is `0.0`, and the committee produces bit-for-bit the number it
+   produced before this phase existed. There is a test that pins precisely that. Enrichment can
+   only ever be the platform *using* what it knows; it is structurally incapable of being a
+   disguised recalibration. **No threshold was lowered in this phase.**
+2. **Evidence is shrunk toward ignorance.** Every cohort rate is pulled toward 0.5 by a
+   pseudo-count, and a cohort below `min_cohort` is *reported but silent*. Two winning trades
+   are an anecdote; they must not move a probability.
+3. **The nudge is bounded** (`LEARNING_ENRICHMENT_MAX_PRIOR_LOG_ODDS`, default 1.0 logit). The
+   prior enters as an additive term on the meta-model's logit — the only place a prior belongs
+   in a logistic model: it shifts the starting point and distorts no specialist's
+   contribution. On the stop-loss head it enters **negated**, because that head's weights are
+   negative and one sign for all three would have made encouraging history argue that a token
+   is *more* likely to stop out.
+4. **Consulted-and-empty is a recorded state.** `evidence_available=False` is distinct from
+   "never enriched", and the metrics separate three outcomes — `found` / `empty` /
+   `unavailable`. A young platform and a broken one looked identical for weeks; that is the
+   single most expensive thing about the last audit and it does not recur here.
+
+Two further effects, both fixing an existing dishonesty:
+
+- **`sample_support` finally answers its own question.** The Confidence Engine documents that
+  factor as *"how many similar historical examples exist"*; it was a number read from
+  configuration. It is now measured per candidate from ground-truth cohorts (observations do
+  not count — an opinion about a wallet is not a result from one).
+- **History is stated, not just applied.** Every explanation carries the cohorts behind the
+  prior, or the caveat *"no comparable history yet — judged on present evidence alone"*. A
+  prior that moves a number without appearing in the account of why is the black box this
+  context refuses to be.
+
+The enrichment is persisted **with** the prediction (`CommitteePrediction.enrichment`): a
+verdict is only auditable next to the memory that informed it.
+
+### The loop closes on itself
+
+The enricher matches cohorts on the **tags of settled lessons** — so a lesson recorded without
+cohort keys is a trade the platform paid for and can only ever learn from in isolation. The
+approval event carries none of them (the Risk Manager knows a candidate, not its provenance),
+but the committee does, and it publishes them on the prediction that immediately precedes the
+approval. The Knowledge runtime now remembers that identity and merges it into the decision's
+tags, with the approval's own attribution winning where the two overlap. Today's enrichment is
+what makes tomorrow's possible.
+
+### Architecture
+
+- **The dependency is a narrow read port the Learning context declares itself**
+  (`CandidateHistoryPort`), satisfied by one adapter at Learning's edge
+  (`KnowledgeCandidateHistory`) that touches only Knowledge's **domain** layer. Knowledge
+  still imports nothing; the arrow points Learning → Knowledge and there is no cycle. The
+  enricher itself is pure and is tested with a handful of lessons and no database.
+- **Cost is bounded by design.** The lesson set is cached with a TTL and lessons are
+  normalised once per refresh, not once per candidate: enrichment runs on the Scanner's hot
+  path, and re-reading the ledger per token would tie the brain's throughput to the ledger's
+  size — gradually, months from now.
+- **Failure degrades, never blocks.** An unreachable memory yields a neutral, clearly-labelled
+  "could not ask" enrichment; the token is still judged. The enricher takes no decision, sizes
+  nothing and cannot reject a candidate.
+
+> **What Phase 3 does not claim.** The enricher makes the platform *use* what it has learned;
+> it does not create knowledge. On a memory with no settled lessons it is exactly neutral by
+> construction, so the first trades still have to come from somewhere — that is the deliberate
+> bootstrap policy (audit Phase 2), still open, and still not the same thing as recalibrating
+> thresholds.
+
+---
+
 ## 7. Testing
 
 `backend/tests` (379 tests, all green; `mypy --strict` clean; `ruff` clean; suite runs
@@ -1888,6 +2031,28 @@ warnings-as-errors):
   both directions (Research must not import Knowledge, Knowledge must not import Research) and
   `test_events_registry` gaining the collision scan that catches two contexts naming an event
   the same thing.
+- Phase 3 — the Candidate Enricher (2026-07-28), **+30 tests**:
+  `test_committee_enrichment` — organised around the four ways this component could be wrong
+  while looking right. **Enrichment is impossible to bypass** (the committee refuses a bare
+  decision context; the handler cannot be built without an enricher; every prediction carries
+  the memory it was judged with). **An empty memory changes nothing** (`prior_log_odds` is
+  exactly 0.0, the fusion with a zero prior is bit-for-bit the fusion without one, and a
+  two-trade cohort is reported but silent) — the regression that would matter most is
+  enrichment quietly recalibrating the platform. **Real history informs the verdict, in the
+  right direction and by a bounded amount** (a developer's record reaches the prior and is
+  shrunk toward ignorance; a bad record pushes the other way; good precedent raises P(ROI+)
+  *and* lowers P(SL), which one sign across all three heads would have got backwards; a
+  500-trade lopsided history still cannot exceed the cap; similar patterns are found with no
+  shared tag; a "nearest" neighbour that is nowhere near is not treated as precedent; all
+  eleven dimensions are always reported; wallet familiarity is marked `observations` and never
+  counts as an example; `sample_support` measures *this candidate*; history is stated in the
+  explanation and injected as `history.*` features only when it means something; the
+  enrichment survives persistence). **Failure degrades** (an unreachable memory never stops a
+  token being judged and is distinguishable from an empty one; a candidate with no identity is
+  still enriched). Plus the narrative classifier, including that it does not match across word
+  boundaries — *CATALYST is not a cat coin*. `test_knowledge_loop` gains
+  **the cohort keys of a decision surviving into its lesson**, without which enrichment could
+  never learn a cohort from a real trade.
 
 Everything is testable because every dependency is a port; in-memory adapters
 back the tests, real adapters back production. The frontend passes `tsc` and a
@@ -1959,6 +2124,23 @@ Earlier pending items remain relevant:
 ---
 
 ## Changelog of this document
+
+- **2026-07-28** — **Phase 3 — the Candidate Enricher** (§6o). The decision path never touched
+  permanent memory: the committee judged every token as though the platform had never seen
+  one, which is why the cold start looked like a threshold problem when it was an ignorance
+  problem. A mandatory enrichment stage now sits between the Decision Context Builder and the
+  committee and consults the Knowledge Engine along **eleven** dimensions (developer, wallets,
+  clusters, narrative, launchpad, liquidity, volatility, the token's own outcomes, similar
+  strategies, holder structure, and the nearest past patterns). It is impossible to bypass:
+  `CommitteeManager.evaluate` accepts only an `EnrichedCandidate` and `CommitteeHandler`
+  requires the enricher. Every prior is shrunk toward ignorance, silent below a minimum cohort
+  size, and fused into a **bounded** additive logit — negated on the stop-loss head. **No
+  threshold was lowered**: with an empty memory the enrichment is exactly neutral and the
+  fusion is bit-for-bit what it was. `sample_support` is now measured per candidate instead of
+  read from configuration; explanations state the history behind the number; the enrichment is
+  persisted with the prediction; and the Knowledge runtime remembers the committee's cohort
+  keys so a settled trade can be learned from as a cohort later. Gate: **659 tests** (+30),
+  `mypy --strict` clean (439 files), `ruff` clean.
 
 - **2026-07-23** — **Phase 11, Stage 2 — Final Hardening** (§6l; closing report in
   `docs/PRODUCTION_READINESS.md`). Closing pass over the whole project; **no new

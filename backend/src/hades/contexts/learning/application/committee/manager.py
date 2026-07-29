@@ -25,6 +25,7 @@ from dataclasses import dataclass
 
 from hades.contexts.learning.application.committee.base import SpecialistModel
 from hades.contexts.learning.application.committee.context_features import context_feature_values
+from hades.contexts.learning.application.committee.history_features import history_feature_values
 from hades.contexts.learning.application.confidence import ConfidenceEngine
 from hades.contexts.learning.application.explainability import ExplanationBuilder
 from hades.contexts.learning.application.meta_model import MetaModel
@@ -39,8 +40,9 @@ from hades.contexts.learning.domain.events import (
 )
 from hades.contexts.learning.domain.models import (
     META_MODEL_NAME,
+    CandidateEnrichment,
     CommitteePrediction,
-    DecisionContext,
+    EnrichedCandidate,
     MarketRegime,
     NormalizedVector,
     Opinion,
@@ -112,15 +114,33 @@ class CommitteeManager:
     def set_shadows(self, shadows: Sequence[Committee]) -> None:
         self._shadows = tuple(shadows)
 
-    async def evaluate(self, context: DecisionContext) -> CommitteePrediction:
+    async def evaluate(self, candidate: EnrichedCandidate) -> CommitteePrediction:
+        """Run the committee over an **enriched** candidate.
+
+        The parameter type is the enforcement of the platform rule that no token
+        reaches the AI Committee without first being enriched from the Knowledge
+        Engine. There is no overload taking a bare :class:`DecisionContext` and
+        no optional enrichment argument, so a caller that skipped the enricher
+        cannot construct a call — and the isinstance guard makes that true at
+        runtime too, where an untyped caller (a subscriber handed the wrong
+        object by the bus) would otherwise fail deep inside the fusion with a
+        confusing error.
+        """
+        if not isinstance(candidate, EnrichedCandidate):
+            raise TypeError(
+                "the committee only evaluates enriched candidates; "
+                f"got {type(candidate).__name__}. Run the Candidate Enricher first."
+            )
         started = asyncio.get_running_loop().time()
         correlation = new_id()
         try:
-            vector = self._augment(context)
-            prediction = await self._run(self._active, context, vector, correlation, shadow=False)
+            vector = self._augment(candidate)
+            prediction = await self._run(
+                self._active, candidate, vector, correlation, shadow=False
+            )
             for shadow in self._shadows:
                 try:
-                    await self._run(shadow, context, vector, correlation, shadow=True)
+                    await self._run(shadow, candidate, vector, correlation, shadow=True)
                 except Exception as exc:  # a shadow must never affect the active run
                     _logger.warning("shadow_committee_failed", label=shadow.label, error=str(exc))
         except Exception:
@@ -137,16 +157,20 @@ class CommitteeManager:
     async def _run(
         self,
         committee: Committee,
-        context: DecisionContext,
+        candidate: EnrichedCandidate,
         vector: NormalizedVector,
         correlation: str,
         *,
         shadow: bool,
     ) -> CommitteePrediction:
         started = asyncio.get_running_loop().time()
+        context = candidate.context
+        enrichment = candidate.enrichment
         opinions = self._opinions(committee, vector)
         regime = self._regime.classify(vector)
-        meta = committee.meta.fuse(context.token, opinions)
+        meta = committee.meta.fuse(
+            context.token, opinions, prior_log_odds=enrichment.prior_log_odds
+        )
         volatility = self._volatility(vector, regime)
         confidence = self._confidence.compute(
             opinions=opinions,
@@ -154,10 +178,14 @@ class CommitteeManager:
             coverage=vector.coverage,
             volatility=volatility,
             dataset_quality=self._quality.dataset_quality,
-            sample_support=self._quality.sample_support,
+            sample_support=self._sample_support(enrichment),
         )
         explanation = self._explainer.build(
-            meta=meta, opinions=opinions, confidence=confidence, regime=regime
+            meta=meta,
+            opinions=opinions,
+            confidence=confidence,
+            regime=regime,
+            enrichment=enrichment,
         )
         duration_ms = round((asyncio.get_running_loop().time() - started) * 1000.0, 3)
         prediction = CommitteePrediction(
@@ -173,6 +201,7 @@ class CommitteeManager:
             shadow=shadow,
             correlation_id=correlation,
             duration_ms=duration_ms,
+            enrichment=enrichment,
         )
         await self._persist(prediction)
         if not shadow:
@@ -193,14 +222,30 @@ class CommitteeManager:
                 self._metrics.opinions.labels(member=opinion.member.value).inc()
         return tuple(opinions)
 
-    def _augment(self, context: DecisionContext) -> NormalizedVector:
+    def _augment(self, candidate: EnrichedCandidate) -> NormalizedVector:
+        context = candidate.context
         extra = context_feature_values(context)
+        extra.update(history_feature_values(candidate.enrichment))
         if not extra:
             return context.vector
         merged = dict(context.vector.values)
         merged.update(extra)
         present = tuple(dict.fromkeys((*context.vector.present, *extra.keys())))
         return context.vector.model_copy(update={"values": merged, "present": present})
+
+    def _sample_support(self, enrichment: CandidateEnrichment) -> float:
+        """How many comparable historical examples exist — for *this* candidate.
+
+        The configured value is a platform-wide floor derived from the dataset;
+        the enrichment knows how much of that history is actually about tokens
+        like this one. Taking the larger of the two means a candidate the
+        platform has genuine precedent for is credited for it, while one it has
+        never seen anything like is never credited with *less* than the
+        platform-wide baseline it does have.
+        """
+        if not enrichment.evidence_available:
+            return self._quality.sample_support
+        return max(self._quality.sample_support, enrichment.sample_support)
 
     @staticmethod
     def _volatility(vector: NormalizedVector, regime: RegimeAssessment) -> float:

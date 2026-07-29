@@ -600,6 +600,28 @@ class LearningSettings(_Section):
     # Confidence priors used before enough history accrues (0..1).
     default_dataset_quality: float = 0.5
     default_sample_support: float = 0.35
+    # --- Candidate Enricher --------------------------------------------------
+    # Every candidate is enriched from the Knowledge Engine before the committee
+    # sees it. These knobs bound the work and the influence; none of them can
+    # relax a threshold — with an empty memory the enrichment is exactly neutral
+    # and the committee produces the number it would have produced anyway.
+    #: Settled lessons considered per enrichment pass.
+    enrichment_lesson_window: int = 5_000
+    #: Seconds the lesson set is cached. Lessons arrive as trades settle; tokens
+    #: arrive as the Scanner discovers them, which is orders of magnitude faster.
+    enrichment_cache_seconds: float = 60.0
+    #: Hard cap on how far history may shift the fused probabilities, in logits.
+    #: History informs the committee; it must never overrule the token in front
+    #: of it, because what a memory cannot know is what has changed since.
+    enrichment_max_prior_log_odds: float = 1.0
+    #: Pseudo-count pulling every cohort rate toward 0.5 (higher = more sceptical).
+    enrichment_shrinkage: float = 8.0
+    #: Cohort size below which a prior is reported but contributes nothing.
+    enrichment_min_cohort: int = 3
+    #: Comparable examples at which per-candidate ``sample_support`` saturates.
+    enrichment_support_target: int = 60
+    #: Size of the "similar past patterns" neighbourhood.
+    enrichment_neighbours: int = 25
 
 
 class KnowledgeSettings(_Section):

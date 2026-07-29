@@ -29,6 +29,13 @@ from hades.contexts.features.infrastructure.feature_store import (
     PostgresFeatureStore,
 )
 from hades.contexts.knowledge.domain.events import LessonLearned
+from hades.contexts.knowledge.domain.ports import KnowledgeStore, LessonStore
+from hades.contexts.knowledge.infrastructure.stores import (
+    InMemoryKnowledgeStore,
+    InMemoryLessonStore,
+    PostgresKnowledgeStore,
+    PostgresLessonStore,
+)
 from hades.contexts.learning.application.committee.factory import (
     committee_from_cards,
     default_committee,
@@ -40,6 +47,10 @@ from hades.contexts.learning.application.committee.manager import (
 )
 from hades.contexts.learning.application.confidence import ConfidenceEngine
 from hades.contexts.learning.application.dataset_builder import DatasetBuilder
+from hades.contexts.learning.application.enricher import (
+    EnrichmentPolicy,
+    KnowledgeCandidateEnricher,
+)
 from hades.contexts.learning.application.explainability import ExplanationBuilder
 from hades.contexts.learning.application.feature_catalog import FeatureCatalog, FeatureNormalizer
 from hades.contexts.learning.application.knowledge_feedback import KnowledgeFeedback
@@ -57,6 +68,7 @@ from hades.contexts.learning.domain.ports import (
     OutcomeStore,
     PredictionStore,
 )
+from hades.contexts.learning.infrastructure.candidate_history import KnowledgeCandidateHistory
 from hades.contexts.learning.infrastructure.context_builder import DecisionContextBuilder
 from hades.contexts.learning.infrastructure.model_registry import (
     InMemoryModelRegistry,
@@ -105,11 +117,13 @@ class CommitteeRuntime:
         self._training = TrainingEngine()
         self._validation = ValidationEngine()
         self._manager = self._build_manager()
+        self._enricher = self._build_enricher()
         self._feedback = KnowledgeFeedback(
             self._outcome_store, self._feature_store, self._normalizer
         )
         self._predictions_session = 0
         self._lessons_session = 0
+        self._enriched_session = 0
         self._last: dict[str, Any] = {}
         self._register()
 
@@ -161,9 +175,41 @@ class CommitteeRuntime:
             quality=quality,
         )
 
+    def _build_enricher(self) -> KnowledgeCandidateEnricher:
+        """Wire the Candidate Enricher onto the platform's permanent memory.
+
+        The store adapters are built here rather than borrowed from the
+        Knowledge runtime: this is a **read-only** window, the two runtimes must
+        be able to live in different processes, and a shared object handle would
+        be a live reference from the brain into the memory's write path — the
+        coupling the Knowledge context was designed to refuse.
+        """
+        learning = self._c.settings.learning
+        if self._c.database is not None:
+            lessons: LessonStore = PostgresLessonStore(self._c.database)
+            observations: KnowledgeStore = PostgresKnowledgeStore(self._c.database)
+        else:
+            lessons = InMemoryLessonStore()
+            observations = InMemoryKnowledgeStore()
+        history = KnowledgeCandidateHistory(
+            lessons,
+            observations,
+            self._normalizer,
+            cache_ttl_seconds=learning.enrichment_cache_seconds,
+        )
+        policy = EnrichmentPolicy(
+            lesson_window=learning.enrichment_lesson_window,
+            shrinkage=learning.enrichment_shrinkage,
+            max_prior_log_odds=learning.enrichment_max_prior_log_odds,
+            support_target=learning.enrichment_support_target,
+            neighbours=learning.enrichment_neighbours,
+            min_cohort=learning.enrichment_min_cohort,
+        )
+        return KnowledgeCandidateEnricher(history, self._normalizer, policy, self._metrics)
+
     def _register(self) -> None:
         builder = DecisionContextBuilder(self._feature_store, self._normalizer, self._c.database)
-        CommitteeHandler(self._manager, builder).register(self._c.event_bus)
+        CommitteeHandler(self._manager, builder, self._enricher).register(self._c.event_bus)
         self._feedback.register(self._c.event_bus)
         self._c.event_bus.subscribe(CommitteePredictionGenerated.__name__, self._on_prediction)
         # The learning loop's return leg. Knowledge does the joining (a decision's
@@ -309,6 +355,9 @@ class CommitteeRuntime:
             return
         self._predictions_session += 1
         p = event.prediction
+        enrichment = p.enrichment
+        if enrichment is not None and enrichment.evidence_available:
+            self._enriched_session += 1
         self._last = {
             "mint": str(p.token.mint),
             "prob_roi_positive": p.meta.prob_roi_positive,
@@ -318,6 +367,10 @@ class CommitteeRuntime:
             "regime": p.regime.regime.value,
             "headline": p.explanation.headline if p.explanation else "",
             "at": p.at.isoformat(),
+            # What the platform already knew when it produced this number.
+            "prior_log_odds": enrichment.prior_log_odds if enrichment else 0.0,
+            "history_samples": enrichment.total_samples if enrichment else 0,
+            "history_dimensions": list(enrichment.informative_dimensions) if enrichment else [],
         }
 
     def snapshot(self) -> dict[str, Any]:
@@ -331,6 +384,10 @@ class CommitteeRuntime:
             # Ground-truth samples that reached the ledger this session. Zero
             # while trades are closing means the learning loop is open again.
             "lessons_session": self._lessons_session,
+            # Predictions this session that had real precedent behind them. Zero
+            # while predictions climb means the committee is judging every token
+            # from scratch — the state Phase 3 exists to end.
+            "enriched_with_evidence_session": self._enriched_session,
             "last_prediction": self._last,
             "updated_at": time.time(),
         }

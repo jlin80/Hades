@@ -301,7 +301,13 @@ def _model_view(record: CommitteeModelRecord) -> dict[str, Any]:
 
 
 def _prediction_summary(record: CommitteePredictionRecord) -> dict[str, Any]:
-    explanation = (record.prediction or {}).get("explanation") or {}
+    payload = record.prediction or {}
+    explanation = payload.get("explanation") or {}
+    # What the platform already knew when it produced this verdict. A list of
+    # predictions where this is empty everywhere means the brain is judging every
+    # token from scratch — visible at a glance rather than after an audit.
+    enrichment = payload.get("enrichment") or {}
+    priors = enrichment.get("priors") or []
     return {
         "mint": record.mint,
         "symbol": record.symbol,
@@ -314,4 +320,9 @@ def _prediction_summary(record: CommitteePredictionRecord) -> dict[str, Any]:
         "feature_coverage": record.feature_coverage,
         "shadow": record.shadow,
         "headline": explanation.get("headline", ""),
+        "history_prior": enrichment.get("prior_log_odds", 0.0),
+        "history_samples": sum(int(p.get("samples", 0)) for p in priors),
+        "history_dimensions": [
+            p.get("dimension") for p in priors if p.get("samples") and p.get("strength")
+        ],
     }

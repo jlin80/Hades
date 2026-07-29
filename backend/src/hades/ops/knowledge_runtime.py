@@ -187,6 +187,10 @@ class KnowledgeRuntime:
         self._beliefs = _BoundedCache()
         self._approved = _BoundedCache()
         self._positions = _BoundedCache()
+        # Cohort keys (developer / launchpad / narrative / cluster) as the
+        # committee established them, so a settled lesson can be attributed and
+        # therefore learned from as a cohort later.
+        self._identities = _BoundedCache()
 
         self._register()
 
@@ -469,13 +473,17 @@ class KnowledgeRuntime:
             if not frozen:
                 _logger.info("approval_without_features", mint=mint)
             beliefs = dict(self._beliefs.get(mint) or {})
+            # The approval's own tags win: they are what the Risk Manager
+            # actually acted on. The committee's cohort keys fill the gaps.
+            tags = {str(k): str(v) for k, v in (self._identities.get(mint) or {}).items()}
+            tags.update(_tags_of(payload))
             self._approved.put(
                 mint,
                 {
                     "features": frozen,
                     "beliefs": beliefs,
                     "decided_at": event.occurred_at,
-                    "tags": _tags_of(payload),
+                    "tags": tags,
                     "correlation_id": str(envelope["correlation_id"] or "") or None,
                 },
             )
@@ -581,8 +589,45 @@ class KnowledgeRuntime:
                     beliefs["confidence"] = float(confidence["final"])
             if beliefs:
                 self._beliefs.put(mint, beliefs)
+            self._remember_identity(mint, prediction)
         except Exception as exc:
             _logger.warning("knowledge_prediction_failed", error=str(exc))
+
+    def _remember_identity(self, mint: str, prediction: object) -> None:
+        """Keep the cohort keys the committee established for this candidate.
+
+        This is the loop closing on itself. The Candidate Enricher answers
+        "how have tokens by this developer / on this launchpad / telling this
+        narrative worked out?" by matching **tags on settled lessons** — so a
+        lesson recorded without those tags is a trade the platform can never
+        learn a cohort from. The approval event does not carry them (the Risk
+        Manager knows a candidate, not its provenance), but the committee does,
+        and it publishes them on the prediction that immediately precedes the
+        approval.
+
+        Read defensively by key, like everything else here: Knowledge does not
+        import the Learning context, and a payload-shape change must degrade to
+        an untagged lesson rather than to a crash on the publisher's task.
+        """
+        if not isinstance(prediction, dict):
+            return
+        enrichment = prediction.get("enrichment")
+        if not isinstance(enrichment, dict):
+            return
+        identity = enrichment.get("identity")
+        if not isinstance(identity, dict):
+            return
+        tags = {
+            key: str(value)
+            for key in ("developer", "launchpad", "narrative", "cluster_id", "strategy")
+            if isinstance(value := identity.get(key), str) and value
+        }
+        # ``cluster_id`` is the committee's name for it; the tag the enricher
+        # and the Risk Manager's correlation engine both match on is ``cluster``.
+        if "cluster_id" in tags:
+            tags["cluster"] = tags.pop("cluster_id")
+        if tags:
+            self._identities.put(mint, tags)
 
     # -- status ---------------------------------------------------------------
 

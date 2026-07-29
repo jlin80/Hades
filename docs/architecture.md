@@ -20,13 +20,19 @@ authorises a trade**, and only the Execution Engine knows paper vs. live.
 > **Updated 2026-07-28 (Phase 1).** The **learning loop is now closed** through the new
 > `knowledge` context (green). Dashed red edges are still **breaks in the graph** — a
 > producer with no consumer.
+>
+> **Updated 2026-07-28 (Phase 3).** The loop's **read** half is closed too: the memory feeds
+> the decision path through the mandatory **Candidate Enricher**. Nothing reaches the AI
+> Committee without passing through it — `CommitteeManager.evaluate` accepts only an
+> `EnrichedCandidate`.
 
 ```mermaid
 flowchart TD
     SC[Scanner] -->|TokenDiscovered, TokenMetadataCollected| FE[Feature Store]
     FE -->|FeaturesComputed| SE[Security Engine]
     SE -->|SecurityScoreComputed / TokenApproved| WI[Wallet Intelligence]
-    WI -->|WalletIntelligenceComputed| AI[AI Committee]
+    WI -->|WalletIntelligenceComputed| CE[Candidate Enricher]
+    CE -->|EnrichedCandidate| AI[AI Committee]
     AI -->|CommitteePredictionGenerated| RK[Risk Manager]
     AI -->|CommitteePredictionGenerated| ST[Strategy Engine]
     ST -.->|EnsembleSignalGenerated| GAP1[["✗ no subscriber"]]:::broken
@@ -43,6 +49,7 @@ flowchart TD
     RES[["research lab (internal + external)"]] -.->|every finished study| KN
     RK -.->|TradeApproved: FREEZE features| KN
     PF -.->|PositionOpened / PositionClosed| KN
+    KN ==>|11 dimensions of history| CE
     KN ==>|LessonLearned| KF[Knowledge Feedback]
     KF ==>|ground-truth samples| OS[(committee_outcomes)]
     SE -.->|TokenRejected| KF
@@ -52,7 +59,7 @@ flowchart TD
     classDef decide fill:#fee,stroke:#a88;
     classDef memory fill:#efe,stroke:#3a3,stroke-width:2px;
     classDef broken fill:#fdd,stroke:#c00,stroke-width:2px,stroke-dasharray: 4 4;
-    class SC,FE,SE,WI,AI,ST quantify;
+    class SC,FE,SE,WI,CE,AI,ST quantify;
     class RK,EX decide;
 ```
 
@@ -78,6 +85,27 @@ The thick edges above are the loop that did not exist. Its two hard rules:
 
 `ModelPromoted` now closes the deployment half too: the committee reloads its active models
 in place, where previously a promotion changed nothing until the worker was restarted.
+
+### The enrichment stage (added in Phase 3)
+
+Between the Decision Context Builder and the committee, every candidate is enriched from
+permanent memory along eleven dimensions — developer, wallets, clusters, narrative, launchpad,
+liquidity, volatility, the token's own outcomes, similar strategies, holder structure and the
+nearest past patterns. Three properties make it safe to have on the hot path of a firehose:
+
+1. **It cannot be bypassed.** The type of `evaluate` is the enforcement; there is no overload
+   taking a bare `DecisionContext`.
+2. **It cannot relax the platform.** With an empty memory the fused prior is exactly `0.0`,
+   so the probabilities are bit-for-bit what they were before the stage existed. The prior is
+   shrunk toward ignorance, silent below a minimum cohort size, and bounded overall.
+3. **It cannot block.** An unreachable memory yields a neutral, explicitly-labelled "could not
+   ask" enrichment and the token is still judged — and that state is distinguishable in the
+   metrics from a memory that was asked and had nothing.
+
+The dependency is a **narrow read port the Learning context declares itself**
+(`CandidateHistoryPort`), satisfied by one adapter at Learning's edge that touches only
+Knowledge's *domain* layer. Knowledge still imports nothing; the arrow points Learning →
+Knowledge, so no cycle exists.
 
 ### Contexts with no wiring
 
@@ -173,6 +201,11 @@ flowchart TD
   official knowledge producer, and the connection is nothing but domain events. Neither
   context imports the other. A direct call would put an ingestion failure on the lab's
   critical path and hand a context that must never act a live handle on one that writes.
+- **Enrichment is mandatory (verified):** `tests/test_committee_enrichment.py` asserts the
+  committee refuses a bare decision context and that the handler cannot be constructed without
+  an enricher — so "no candidate is judged from scratch" is a property of the types, not of
+  anyone's discipline. The same file pins the other half: with an empty memory the enrichment
+  is *exactly* neutral, so the stage can never act as a hidden recalibration.
 - **Single trade authoriser (verified):** `TradeApproved` is constructed in exactly one
   place — `risk/application/manager.py`.
 - **No two events share a routing key (verified):** the bus routes on the class name, so two

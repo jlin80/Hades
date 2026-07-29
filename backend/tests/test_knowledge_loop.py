@@ -302,15 +302,30 @@ async def test_the_committee_beliefs_travel_with_the_lesson(
     assert isinstance(prediction, CommitteePredictionGenerated)
 
 
-def _committee_prediction() -> DomainEvent:
+def _committee_prediction(*, with_identity: bool = False) -> DomainEvent:
     from hades.contexts.learning.domain.events import CommitteePredictionGenerated
     from hades.contexts.learning.domain.models import (
+        CandidateEnrichment,
+        CandidateIdentity,
         CommitteePrediction,
         ConfidenceFactors,
         MetaPrediction,
         RegimeAssessment,
     )
 
+    enrichment = (
+        CandidateEnrichment(
+            identity=CandidateIdentity(
+                mint=str(_TOKEN.mint),
+                developer="DeployerXYZ",
+                launchpad="pumpfun",
+                narrative="doge",
+                cluster_id="cluster-7",
+            )
+        )
+        if with_identity
+        else None
+    )
     return CommitteePredictionGenerated(
         aggregate_id=new_id(),
         occurred_at=_AT,
@@ -327,8 +342,40 @@ def _committee_prediction() -> DomainEvent:
             ),
             confidence=ConfidenceFactors(final=0.48),
             regime=RegimeAssessment(),
+            enrichment=enrichment,
         ),
     )
+
+
+@pytest.mark.asyncio
+async def test_the_cohort_keys_of_a_decision_are_remembered_with_its_lesson(
+    runtime: tuple[KnowledgeRuntime, InMemoryEventBus],
+) -> None:
+    """Without this, enrichment could never learn a cohort from a real trade.
+
+    The Candidate Enricher answers "how have tokens by this developer, on this
+    launchpad, telling this narrative worked out?" by matching tags on settled
+    lessons. The approval event carries none of them — the Risk Manager knows a
+    candidate, not its provenance — so the committee's identity has to be the
+    thing that survives into the lesson. A lesson without cohort keys is a trade
+    the platform paid for and can only ever learn from once, in isolation.
+    """
+    knowledge, bus = runtime
+    await bus.publish(_features_event(_ENTRY_FEATURES))
+    await bus.publish(_committee_prediction(with_identity=True))
+    await bus.publish(_approval())
+    await bus.publish(_opened("pos-1"))
+    await bus.publish(_closed("pos-1", 25.0))
+
+    lessons = await knowledge.lessons.load()
+    tags = lessons[0].tags
+    assert tags["developer"] == "DeployerXYZ"
+    assert tags["narrative"] == "doge"
+    assert tags["launchpad"] == "pumpfun"
+    # The committee calls it ``cluster_id``; every consumer matches ``cluster``.
+    assert tags["cluster"] == "cluster-7"
+    # The approval's own attribution still wins where the two overlap.
+    assert tags["strategy"] == "momentum_breakout"
 
 
 # --- provenance --------------------------------------------------------------

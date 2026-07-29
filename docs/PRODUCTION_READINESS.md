@@ -21,7 +21,7 @@ Companion documents: the living reference [`../hades.md`](../hades.md), the arch
 | | |
 |---|---|
 | Overall posture | **READY (paper) · NOT-LIVE by construction** |
-| Backend health | **629 tests passing**, `mypy --strict` clean (435 files), `ruff` clean (0 findings), suite runs **warnings-as-errors** |
+| Backend health | **659 tests passing**, `mypy --strict` clean (439 files), `ruff` clean (0 findings), suite runs **warnings-as-errors** |
 | Trading mode | Paper only; live hard-gated (env gate × 2 + readiness checklist + explicit confirm + authenticated operator) and unbuildable (no live adapters) |
 | Deployment | Turnkey: `git clone → configure .env → docker compose up -d` (schema auto-migrated) |
 | Codebase | 19 bounded contexts · 60 tables / 10 migrations · React dashboard · Docker/Compose · Prometheus/Grafana |
@@ -42,6 +42,9 @@ Companion documents: the living reference [`../hades.md`](../hades.md), the arch
 - **Knowledge is the permanent memory** and closes the learning loop: it records from every
   producer and pairs each decision with its realised outcome. It is **structurally unable to
   act** — an AST test asserts it imports no other bounded context at all.
+- **The Candidate Enricher is the loop's read half.** Every candidate is enriched from that
+  memory before the committee sees it, and the committee accepts no other input type, so no
+  token is ever judged from scratch.
 
 See [`architecture.md`](architecture.md) for the flow, service, dependency and event maps.
 
@@ -53,6 +56,7 @@ See [`architecture.md`](architecture.md) for the flow, service, dependency and e
 | Feature Store (versioned, cached) | ✅ | Full |
 | Security Engine (10 analyzers, critical-flag veto, explainable) | ✅ | Full |
 | Wallet Intelligence (permanent on-chain KB, clustering, reputation) | ✅ | Full |
+| Candidate Enricher (11 dimensions of history, mandatory, bounded, neutral when empty) | ✅ | Full |
 | AI Committee (12 logistic specialists → meta, registry, shadow, drift, explainability) | ✅ | Full (advisory) |
 | Scoring (probabilities + confidence + composite; never a decision) | ✅ | Full |
 | Strategy Engine (15 plugins, weighted ensemble, dynamic weights, shadow lifecycle) | ✅ | Full (advisory; `gate_risk` off) |
@@ -69,8 +73,8 @@ See [`architecture.md`](architecture.md) for the flow, service, dependency and e
 
 ## 4. Test coverage
 
-- **378 backend tests**, all green, run **warnings-as-errors**; `mypy --strict` clean across
-  all 407 source files; `ruff` clean.
+- **659 backend tests**, all green, run **warnings-as-errors**; `mypy --strict` clean across
+  all 439 source files; `ruff` clean.
 - Coverage is **behavioural and invariant-focused**, which matters more than a line-count
   percentage for a safety-critical system: money-safety invariants, fail-closed paths, the
   research-isolation AST check, the paper/live seam, schema integrity, and now the
@@ -175,6 +179,34 @@ Isolation is unchanged and still AST-verified: Research imports no `execution`, 
 **Still open:** the *candidate* (model) bridge remains one-sided and incompatible on format,
 model family and feature space. That is a product decision (audit §7.4), not an
 implementation gap.
+
+## 7c. Closed in Phase 3 — the Candidate Enricher (2026-07-28)
+
+Phases 1 and 2 built a memory and filled it. Nothing on the decision path read it.
+
+| Was | Now |
+|---|---|
+| The committee judged every token as if the platform had never seen a token — the memory was write-only from the brain's point of view | Every candidate is enriched from the Knowledge Engine along **eleven** dimensions before the committee sees it |
+| `sample_support`, documented as *"how many similar historical examples exist"*, was a number read from configuration | Measured per candidate from ground-truth cohorts only |
+| A verdict could not be audited against what the platform knew at the time | The enrichment is persisted **with** the prediction, and stated in the explanation |
+| A settled trade carried no cohort keys, so no future candidate could ever learn from it as a developer / narrative / launchpad / cluster | The committee's identity is remembered by the Knowledge runtime and merged into the decision's tags |
+
+**Why this is not a threshold change.** With an empty memory every prior has zero strength,
+the fused nudge is exactly `0.0`, and the fusion is bit-for-bit what it was before the stage
+existed — pinned by test. Priors are shrunk toward 0.5 by a pseudo-count, are silent below a
+minimum cohort size, and the total influence is capped
+(`LEARNING_ENRICHMENT_MAX_PRIOR_LOG_ODDS`). History informs the committee; it cannot overrule
+the token in front of it, because what a memory cannot know is what has changed since.
+
+**Failure posture.** An unreachable memory produces a neutral enrichment labelled
+*"could not ask"* and the token is still judged. The metrics separate `found` / `empty` /
+`unavailable`, because a young platform and a broken one looking identical is the single most
+expensive failure mode this codebase has had.
+
+**Still open:** the enricher makes the platform *use* what it has learned; it does not create
+knowledge. The first settled trades still have to come from somewhere — the deliberate
+bootstrap policy (audit Phase 2) remains open, and remains a different thing from
+recalibrating thresholds.
 
 ## 8. Known limitations
 

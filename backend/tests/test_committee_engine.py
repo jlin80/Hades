@@ -22,11 +22,12 @@ from hades.contexts.learning.domain.events import (
     InferenceCompleted,
     PredictionGenerated,
 )
-from hades.contexts.learning.domain.models import DecisionContext
+from hades.contexts.learning.domain.models import CommitteePrediction, DecisionContext
 from hades.contexts.learning.infrastructure.stores import InMemoryPredictionStore
 from hades.shared_kernel.domain.events import DomainEvent
 from hades.shared_kernel.events import InMemoryEventBus
 from hades.shared_kernel.observability import MetricsRegistry
+from tests.enrichment_support import enrich
 
 _TOKEN = TokenRef(mint=TokenMint(address="M" * 44))
 
@@ -85,6 +86,15 @@ class _Harness:
             quality=QualitySignals(dataset_quality=0.6, sample_support=0.5),
         )
 
+    async def evaluate(self, context: DecisionContext) -> CommitteePrediction:
+        """Enrich, then judge — the only route into the committee there is.
+
+        These tests run against an *empty* memory on purpose: enrichment must be
+        exactly neutral when the platform has learned nothing, so every
+        expectation below is the pre-enrichment behaviour, unchanged.
+        """
+        return await self.manager.evaluate(await enrich(context))
+
     async def _collect(self, event: DomainEvent) -> None:
         self.events.append(event)
 
@@ -123,7 +133,7 @@ def _context(values: dict[str, float], **kwargs: object) -> DecisionContext:
 
 async def test_committee_produces_full_prediction() -> None:
     h = _Harness()
-    prediction = await h.manager.evaluate(_context(_STRONG))
+    prediction = await h.evaluate(_context(_STRONG))
 
     assert len(prediction.opinions) == 12
     assert all(not o.abstained for o in prediction.opinions)
@@ -135,7 +145,7 @@ async def test_committee_produces_full_prediction() -> None:
 
 async def test_committee_emits_all_events() -> None:
     h = _Harness()
-    await h.manager.evaluate(_context(_STRONG))
+    await h.evaluate(_context(_STRONG))
     assert h.count(InferenceCompleted) == 12
     assert h.count(CommitteeFinished) == 1
     assert h.count(ConfidenceCalculated) == 1
@@ -145,7 +155,7 @@ async def test_committee_emits_all_events() -> None:
 
 async def test_prediction_persisted_and_retrievable() -> None:
     h = _Harness()
-    await h.manager.evaluate(_context(_STRONG))
+    await h.evaluate(_context(_STRONG))
     latest = await h.store.latest_for(_TOKEN)
     assert latest is not None
     recent = await h.store.recent()
@@ -154,7 +164,7 @@ async def test_prediction_persisted_and_retrievable() -> None:
 
 async def test_shadow_runs_but_does_not_emit_headline_event() -> None:
     h = _Harness(shadow=True)
-    await h.manager.evaluate(_context(_STRONG))
+    await h.evaluate(_context(_STRONG))
     # Only the active committee emits the headline event.
     assert h.count(CommitteePredictionGenerated) == 1
     # Both active and shadow were persisted.
@@ -164,8 +174,8 @@ async def test_shadow_runs_but_does_not_emit_headline_event() -> None:
 
 async def test_strong_token_scores_above_weak_token() -> None:
     h = _Harness()
-    strong = await h.manager.evaluate(_context(_STRONG))
-    weak = await h.manager.evaluate(
+    strong = await h.evaluate(_context(_STRONG))
+    weak = await h.evaluate(
         _context(
             _STRONG,
             security_approved=False,
@@ -185,13 +195,13 @@ async def test_strong_token_scores_above_weak_token() -> None:
 
 async def test_low_coverage_lowers_confidence() -> None:
     h = _Harness()
-    rich = await h.manager.evaluate(_context(_STRONG))
-    sparse = await h.manager.evaluate(_context({"basic.liquidity": 100_000.0}))
+    rich = await h.evaluate(_context(_STRONG))
+    sparse = await h.evaluate(_context({"basic.liquidity": 100_000.0}))
     assert sparse.confidence.coverage < rich.confidence.coverage
 
 
 @pytest.mark.parametrize("values", [{}, {"basic.liquidity": 1000.0}])
 async def test_committee_never_crashes_on_thin_input(values: dict[str, float]) -> None:
     h = _Harness()
-    prediction = await h.manager.evaluate(_context(values))
+    prediction = await h.evaluate(_context(values))
     assert prediction is not None  # degrades, never raises

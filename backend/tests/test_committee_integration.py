@@ -42,6 +42,7 @@ from hades.shared_kernel.domain.events import DomainEvent
 from hades.shared_kernel.domain.identifiers import new_id
 from hades.shared_kernel.events import InMemoryEventBus
 from hades.shared_kernel.observability import MetricsRegistry
+from tests.enrichment_support import enricher
 
 _TOKEN = TokenRef(mint=TokenMint(address="M" * 44))
 
@@ -117,7 +118,7 @@ async def test_handler_runs_committee_on_intelligence_event() -> None:
         prediction_store=InMemoryPredictionStore(),
         quality=QualitySignals(),
     )
-    CommitteeHandler(manager, _StubBuilder()).register(bus)
+    CommitteeHandler(manager, _StubBuilder(), enricher()).register(bus)
     await bus.publish(
         WalletIntelligenceComputed(
             aggregate_id=new_id(),
@@ -143,7 +144,7 @@ async def test_handler_swallows_none_context() -> None:
         metrics=LearningMetrics(MetricsRegistry()),
         prediction_store=InMemoryPredictionStore(),
     )
-    CommitteeHandler(manager, _NoneBuilder()).register(bus)
+    CommitteeHandler(manager, _NoneBuilder(), enricher()).register(bus)
     # No context -> no crash, no prediction.
     await bus.publish(
         WalletIntelligenceComputed(
