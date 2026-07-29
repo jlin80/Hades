@@ -14,10 +14,11 @@
 
 | | |
 |---|---|
-| **Current phase** | **Phase 11 — Production Hardening, Stage 2 (final code-quality & deployment closure)** |
+| **Current phase** | **Phase 4 — Exploration Mode: the budgeted, self-terminating answer to the cold start (§6p)** |
 | **Version** | `0.10.0` |
 | **Trading** | Paper only. Live execution is hard-gated OFF (two switches), blocked by the Production Checklist (any failing required subsystem or an active Emergency Mode refuses the switch to LIVE), **and** — as of Stage 2 — the switch to LIVE additionally requires an authenticated operator (never the implicit `system` principal). The Execution Engine remains the *only* component that knows the mode; everything upstream is mode-agnostic. |
-| **Backend tests** | **659 passing** · `mypy --strict` clean (439 src files) · **`ruff` clean (0 findings)** · suite runs **warnings-as-errors** |
+| **Backend tests** | **704 passing** · `mypy --strict` clean (456 src files) · **`ruff` clean (0 findings)** · suite runs **warnings-as-errors** |
+| **Cold start** | **Resolvable and now addressed.** The learning loop is closed (§6m), the lab feeds it (§6n), the brain reads it (§6o), and a budgeted Exploration programme buys the first ground-truth samples and switches itself off when the memory has them (§6p). Exploration is **off by default** and waives only the AI Committee's conviction gates — never a safety rule, never the defence layer, never an allocation limit. |
 | **Deployment** | `docker compose up -d` is now a complete, no-manual-steps bring-up: a one-shot `migrate` service applies the schema to head before any app service starts. |
 
 > **⚠️ Architecture audit, 2026-07-28 — read before planning any new capability.**
@@ -26,8 +27,9 @@
 > the code sound and the **event graph incomplete**: three open circuits meant the platform
 > could not learn from its own trades, no matter how it was configured.
 >
-> **Two of the three are closed by Phase 1 (§6m), and the decision path now reads the memory
-> those phases built (Phase 3, §6o).** What remains open:
+> **Two of the three are closed by Phase 1 (§6m), the decision path now reads the memory
+> those phases built (Phase 3, §6o), and the deliberate bootstrap policy the audit asked for
+> is built (Phase 4, §6p).** What remains open:
 >
 > - **The Strategy Engine still has no consumer.** `EnsembleSignalGenerated` is published and
 >   nobody subscribes. All fifteen strategies, the weighted ensemble and the dynamic weight
@@ -47,12 +49,18 @@
 > path consulted permanent memory. A Candidate Enricher now sits between the context builder
 > and the committee, and no candidate can reach the brain without passing through it.
 >
-> **The ordering rule still holds: do not recalibrate thresholds before the platform is
-> demonstrably learning.** Lowering them earlier would have produced trades whose results
-> reached nothing, hiding the defect behind apparent activity. Phase 3 changed nothing about
-> the thresholds: with an empty memory the enrichment is *exactly* neutral, so the committee
-> produces the number it produced before — the cold start is answered with knowledge or it is
-> not answered at all.
+> Closed in Phase 4 (§6p): the cold start itself, in the way the audit asked for — a
+> deliberate bootstrap policy with its own budget and automatic shutdown, **not** a
+> recalibration. Exploration Mode may take a candidate the *conviction* gates muted, at a
+> fixed dollar-sized stake on an independent budget, only while the memory demonstrably lacks
+> the evidence to decide; it latches itself off the moment that stops being true.
+>
+> **The ordering rule still holds, and no threshold has been lowered to this day.** Lowering
+> them would have applied to all capital, permanently, on the strength of no evidence — which
+> is exactly the decision the evidence was meant to inform. Phase 3 changed nothing about the
+> thresholds (with an empty memory the enrichment is *exactly* neutral); Phase 4 changes
+> nothing about them either. It adds a separate, bounded, self-terminating path that buys
+> evidence — the cold start is answered with knowledge or it is not answered at all.
 
 Phase 1 established the architecture skeleton (bounded contexts, contracts,
 domain events, shared kernel). Phase 2 built the full platform the system runs on
@@ -254,6 +262,7 @@ research, notification, monitoring observe the whole flow.
 | **execution** | **The only paper↔live seam.** One `Executor` port, two adapters. | `OrderSubmitted/Filled/Failed` | `Executor`, `TransactionSigner` |
 | **learning** | Build datasets from history, retrain/evaluate, **propose** (never auto-promote). | `ModelTrained`, `ModelPromotionProposed` | `TrainingDataAssembler`, `ModelTrainer`, `ModelPublisher` |
 | **research** | Offline R&D on **copied** data. **No path to execution.** Human-gated promotion. | `ExperimentCompleted`, `CandidateProposed` | `ExperimentRunner`, `HistoricalDataReader` |
+| **exploration** | **The cold-start programme.** Decides whether a candidate the Risk Manager's *conviction* gates muted is worth a fixed, dollar-sized sample on an independent budget, while the memory demonstrably lacks evidence. **Authorises nothing** and switches itself off when the evidence is in (§6p). Off by default. | `ExplorationGranted`, `ExplorationSpent`, `ExplorationBudgetExhausted`, `ExplorationCompleted` | `EvidencePort`, `ExplorationLedgerStore` |
 | **knowledge** | **Permanent, verifiable memory.** Records from every producer; joins each decision with its realised outcome. **Cannot act** — imports no other context (§6m). | `KnowledgeRecorded`, `DecisionRecorded`, `LessonLearned` | `KnowledgeStore`, `LessonStore`, `DecisionJournalStore` |
 | **notification** | Outward alerts, severity-gated, transport-agnostic (Discord first). | — | `Notifier` |
 | **monitoring** | Watchdog (heartbeats) + Health Monitor (dependency probes → `/health`). | `ComponentHeartbeat`, `HealthDegraded/Recovered` | `HealthProbe`, `HeartbeatSink` |
@@ -1878,6 +1887,215 @@ what makes tomorrow's possible.
 
 ---
 
+## 6p. Exploration Mode — buying the first evidence, on a budget (Phase 4, 2026-07-29)
+
+Phase 1 gave Hades a memory. Phase 2 filled it with research. Phase 3 made the brain read it.
+All three left the same hole open, and §6o named it explicitly: *the enricher makes the
+platform use what it has learned; it does not create knowledge.* On a memory with no settled
+lessons the enrichment is exactly neutral, so the first trades still have to come from
+somewhere.
+
+Phase 4 is where they come from.
+
+### The deadlock, stated precisely
+
+The defect is structural, not numeric:
+
+```
+the committee is validated against settled trades
+    -> trades happen only when the committee is confident
+        -> with an empty memory it is confident about nothing
+            -> nothing trades -> the memory stays empty
+```
+
+There is an obvious way out and it is the wrong one. Lowering `RISK_MIN_PROB_ROI_POSITIVE`
+breaks the loop by lowering the bar for **all** capital, permanently, on the strength of no
+evidence at all — which is precisely the decision the evidence was supposed to inform. It also
+hides itself: the platform starts trading, the dashboards fill, and nothing distinguishes a
+system that learned something from one that merely stopped being careful.
+
+Exploration breaks it the other way. It buys a **bounded, budgeted, self-terminating** number
+of deliberately tiny samples, keeps every safety rule intact, and turns itself off the moment
+the memory can answer the question on its own.
+
+### What it is allowed to do, and what it is not
+
+A candidate may be traded under exploration rules only when **all** of these hold:
+
+| Condition | Enforced by |
+|---|---|
+| the memory demonstrably lacks the evidence to decide | `EvidenceStatus.sufficient` — checked before anything can spend |
+| the candidate is uncertain, not bad — `P(ROI+)` inside an explicit band | `ExplorationPolicy`, floor **and** ceiling |
+| at least one of its cohorts is under-sampled | deterministic least-known-cohort rule |
+| the daily / weekly / lifetime budgets all have room for one fixed-size trade | four independent ceilings over an append-only ledger |
+| **every safety rule passes, unchanged** | the Risk Manager's safety tuple |
+| **every allocation rule passes, unchanged** | the Risk Manager's allocation tuple |
+
+The last two are the point. An exploration grant waives **exactly one named policy**, and only
+ever from the *conviction* tuple:
+
+```
+GLOBAL GATES      kill switch - circuit breaker - emergency       -- never waivable
+SAFETY            security - developer - wallet - liquidity       -- never waivable
+CONVICTION        min_probability - min_confidence                -- the only waivable pair
+SIZING            fixed exploration sample, not conviction-weighted
+ALLOCATION        positions - capital - drawdown - exposure -
+                  correlation - risk budget - trade rate          -- never waivable
+```
+
+That split is the security boundary of the whole programme, so it is a property of the
+composition root rather than of anybody's discipline. `build_risk_manager` builds two tuples;
+the manager consults only `_conviction` when deciding what a grant may cover. **A rule added to
+the safety tuple next year is protected by default**, without whoever adds it having to know
+exploration exists. `test_exploration_isolation` asserts the membership of both tuples by
+name, because moving `SecurityPolicy` across is a one-line edit that would compile, pass every
+other test, and let the programme buy rug pulls a dollar at a time.
+
+### Risk Manager still the only authoriser; Execution still only an executor
+
+Nothing about the two invariants changed. `TradeApproved` is still constructed in exactly one
+place. The exploration context has **no** method that approves anything: the strongest thing it
+returns is an *eligibility* verdict with a dollar ceiling on it, expressed in the Risk
+Manager's own vocabulary (`ExplorationGrant`) through a port the Risk Manager declares. There
+is a test that `ExplorationGrant` has no `approved`/`decision`/`execute` field, because that
+addition would look, in review, like one more field on a value object.
+
+The Execution Engine was not touched at all. It receives a `TradeApproved` carrying one extra
+boolean and treats it exactly as it treats every other approval.
+
+### No magic heuristics, no black box, no AI operating anything
+
+The textbook answers here — ε-greedy, Thompson sampling, UCB — all decide *how often* to
+explore and leave *which candidate* opaque. That is the wrong trade for a context whose entire
+output is evidence. The frequency is already pinned down by an explicit budget, so what remains
+is a selection rule, and the one used is the simplest defensible thing: **take the candidate
+whose cohort the memory knows least about**, ties broken by key name so two workers justify the
+same candidate identically.
+
+There is **no randomness anywhere in the decision** — a test asserts that twenty-five
+evaluations of the same inputs produce the same verdict — and **no model**. Every verdict
+carries the arithmetic that produced it: which condition was checked, what the numbers were,
+what tipped it. A person with the evidence census, the spend and the candidate can recompute
+the answer on paper. No AI operates: the committee still only quantifies, and its output is an
+*input* to a rule written in Python that anybody can read.
+
+### Auto-shutdown is a latch, not a query
+
+The programme ends by itself, on a stated condition:
+
+```
+lessons   >= EXPLORATION_TARGET_LESSONS
+positive  >= EXPLORATION_TARGET_PER_CLASS
+negative  >= EXPLORATION_TARGET_PER_CLASS
+```
+
+The two class conditions are **not** redundant with the total, and that is the whole lesson of
+the last three phases: sixty settled trades all on one side of zero are a single-class dataset,
+whose AUC is undefined and against which no validation gate can ever pass. A programme that
+stopped on the count alone would stop having achieved nothing.
+
+Once sufficiency is observed the service **latches** off, publishes `ExplorationCompleted`, and
+short-circuits every later candidate without touching the memory again. Lessons are
+append-only so sufficiency cannot genuinely be lost — but a transient read that undercounted
+them would otherwise restart a programme the platform had already declared finished, spending
+budget again with no announcement that it had. The latch makes "exploration ended" a fact with
+a timestamp rather than a condition that happens to hold. There is no configuration in which
+this programme runs forever, and no operator action is needed for it to end.
+
+Only settled lessons count. Not observations, not the Research Lab's backtests however
+numerous: the premise is that the platform lacks **ground truth**, and a simulation is a true
+statement about a model, not about the market. Letting simulations count would let the lab talk
+the platform out of gathering the one kind of evidence it cannot produce.
+
+### An independent budget, derived from an append-only ledger
+
+Four ceilings, independent on purpose — a daily cap alone permits an unbounded total given
+enough days, and a lifetime cap alone permits the whole budget to burn in one afternoon:
+
+```
+per trade   $1.00   fixed, NOT conviction-weighted
+per day    $10.00   (and <= 10 trades)
+per week   $40.00   (and <= 40 trades)
+lifetime  $250.00   -- never resets
+```
+
+Because the size is fixed, the lifetime budget states **exactly how many samples the programme
+can ever buy** (250 with these defaults). A size that grew with conviction would reintroduce,
+at the sizing step and invisibly, the very belief the programme exists to test.
+
+Spend is always **aggregated from the `exploration_grants` table**, never accumulated in a
+process variable. That is correctness, not style: an in-memory total resets on restart, which
+would silently re-authorise the day's budget on every deploy and present weeks later as an
+overspend with nothing in the logs to explain it. A test rebuilds the service over the same
+ledger and asserts it reaches the same conclusion.
+
+The budget is charged **on approval, not on grant**. A candidate that clears exploration and is
+then vetoed by an allocation rule costs the programme nothing — fixed by a test, because a
+budget that charged on grant would overstate its burn and understate its remaining runway.
+
+### Every trade feeds the Knowledge Engine — and is labelled as exploration
+
+Exploration trades travel the ordinary decision pipeline, so the Phase-1 loop picks them up
+with no special casing: `FeaturesComputed` → `TradeApproved` (evidence frozen) →
+`PositionOpened` → `PositionClosed` → `Lesson`. That is the entire point of the programme.
+
+One thing was added: `TradeApproved` now carries `exploration: bool`, and the Knowledge runtime
+turns it into an `exploration=true` tag on the settled lesson. Without it the memory would hold
+the trade but not the fact that a budget bought it, and no later analysis could separate what
+the platform *learned* from what it *believed* — a programme of deliberate dollar-sized samples
+would be indistinguishable, in the training ledger and in every performance figure derived from
+it, from a strategy that simply lost small a lot. For the same reason the programme's own
+events (`ExplorationGranted` / `Spent` / `BudgetExhausted` / `Completed`) are recorded under a
+new `exploration` knowledge source, kept apart from `paper_trading`, and the Risk Manager
+counts exploration approvals in their own metric and their own snapshot field.
+
+### Architecture respected
+
+- **DDD** — a bounded context with its own vocabulary (`domain` / `application` /
+  `infrastructure`). It names no order, no position, no balance and no trading mode, and a
+  vocabulary test forbids it acquiring one.
+- **Isolation, verified by AST, as an allowlist** — Exploration may import the shared kernel
+  and, *from its infrastructure edge only*, Knowledge's **domain**. Execution, risk, portfolio,
+  learning and strategy are all unreachable. The allowlist covers the context somebody adds
+  next year without them remembering this file exists.
+- **Clean Architecture / SOLID** — two narrow ports it declares itself (`EvidencePort`,
+  `ExplorationLedgerStore`), each with a Postgres adapter and an in-memory twin exercised by
+  the same tests. The policy is pure: no I/O, no state, no clock of its own.
+- **Direction of dependency** — Risk → Exploration → Knowledge. No cycles. Exploration holds no
+  reference to the guardian and cannot call it back, which is what keeps "the Risk Manager is
+  the only authoriser" true in the presence of a collaborator that exists to argue for trades.
+- **Event Sourcing** — the ledger is append-only; the port has no `update`, no `delete` and no
+  `clear`, not even on the in-memory twin (a twin that could erase spend is a way to write a
+  test proving a property the real system does not have).
+
+### Operating it
+
+Off by default, and it stays off until an operator sets a budget they are content to lose —
+these trades are chosen for what they will teach, not for their expected return. All knobs are
+`EXPLORATION_*` in `.env.example`. `GET /api/v1/exploration/status` is the page to read: the
+two fields that matter are `active` and `inactive_reason`, because "finished", "out of money"
+and "switched off" are three very different states that a single boolean would collapse.
+`GET /api/v1/exploration/grants` returns the ledger itself, each row carrying the cohort that
+justified it — which is what makes the programme auditable on its own terms: did the budget
+actually spread across the cohorts the memory was missing, or pour into one developer because
+the Scanner kept finding them?
+
+New table `exploration_grants` (migration `0011_exploration_ledger`). Metrics:
+`hades_exploration_active`, `hades_exploration_budget_total_remaining_usd`,
+`hades_exploration_evidence_lessons`, and `hades_exploration_declined_total{reason}` — a single
+undifferentiated decline counter could not distinguish "today's allowance is spent", which
+fixes itself overnight, from "every candidate falls outside the band", which means the band is
+misconfigured and no amount of waiting will produce a trade.
+
+> **What Phase 4 does not claim.** It does not claim the platform will *reach* sufficiency —
+> only that it can now try, at a price fixed in advance, without risking the main capital and
+> without anyone having to remember to stop it. A programme that spends its lifetime budget
+> without reaching both classes ends with `ExplorationBudgetExhausted{window=total}` and a
+> warning to the operator; that is a real outcome, it is announced rather than hidden, and the
+> answer to it is a judgement about the platform, not a bigger budget applied quietly.
+
+---
+
 ## 7. Testing
 
 `backend/tests` (379 tests, all green; `mypy --strict` clean; `ruff` clean; suite runs
@@ -2053,6 +2271,37 @@ warnings-as-errors):
   boundaries — *CATALYST is not a cat coin*. `test_knowledge_loop` gains
   **the cohort keys of a decision surviving into its lesson**, without which enrichment could
   never learn a cohort from a real trade.
+- Phase 4 — Exploration Mode (2026-07-29), **+45 tests**:
+  `test_exploration` — organised around the four ways a programme that spends money to buy
+  evidence could be wrong while looking right. **It waives the right rule and only that one**:
+  a candidate inside the exploration band with a failing security verdict, a bad developer, a
+  suspicious wallet crowd or a thin pool is still rejected by its own rule with the programme
+  active *and nothing is charged*; an open circuit breaker and Emergency Mode still block it;
+  the book's allocation limits still bind, and a grant vetoed afterwards costs the budget
+  nothing. **It ends by itself**: sufficiency requires both classes (60 lessons all on one
+  side of zero are explicitly *not* enough), reaching it latches the programme off and
+  announces `ExplorationCompleted` exactly once however many candidates follow, and a later
+  read that undercounts lessons cannot restart it. **It cannot overspend**: each of the five
+  ceilings declines with its own cause; spend is rebuilt from the ledger, so a brand-new
+  service over the same rows reaches the same conclusion (the restart bug that an in-memory
+  counter would have); yesterday's spend clears the daily window but still counts against the
+  week and the lifetime; exhaustion is announced once per window *instance*. **It stays
+  explainable**: the same inputs produce the same verdict twenty-five times running (no
+  randomness anywhere), an inverted band is not constructible, an exploration approval never
+  reads like a conviction one (`EXPLORATION` in the headline, the arithmetic in the caveats,
+  conviction pinned at 0.0, no trailing stop), and exploration approvals are counted apart from
+  the rest. Plus: the evidence census counts settled lessons and their cohorts and reports an
+  unreadable store as *unavailable* rather than empty; a broken exploration service cannot
+  manufacture an approval; and with the programme absent or disabled the chain is exactly the
+  one that ran before it existed.
+  `test_exploration_isolation` — the structural half. Exploration imports no trading or
+  learning context; its dependencies are an **allowlist** (shared kernel plus Knowledge's
+  domain, and only from its infrastructure edge); its vocabulary names no action; an
+  `ExplorationGrant` has no field that could express an approval; **the Risk Manager's safety
+  policies are not in the waivable tuple, asserted by name** (the one-line edit that would let
+  the programme buy rug pulls); its events are registered on the bus (an unregistered event is
+  silently dropped at the Redis boundary); permanent memory records the programme; and an
+  external bundle cannot claim `exploration` as its source.
 
 Everything is testable because every dependency is a port; in-memory adapters
 back the tests, real adapters back production. The frontend passes `tsc` and a
@@ -2124,6 +2373,27 @@ Earlier pending items remain relevant:
 ---
 
 ## Changelog of this document
+
+- **2026-07-29** — **Phase 4 — Exploration Mode** (§6p). The cold start finally has a
+  deliberate answer instead of a pending decision. A new `exploration` bounded context may let
+  a candidate the Risk Manager's **conviction** gates muted be traded anyway — at a fixed
+  dollar-sized stake on an independent budget with daily, weekly and lifetime ceilings, only
+  while the memory demonstrably lacks the evidence to decide, and only when at least one of the
+  candidate's cohorts is under-sampled. It **switches itself off** on a stated arithmetic
+  condition (enough settled lessons, with a minimum on *each* side of zero — the both-classes
+  requirement that no count alone can substitute for) and latches, so no operator action is
+  needed for the programme to end. Selection is deterministic and reproducible by hand: no
+  bandit, no ε-greedy, no randomness, no model. The Risk Manager's pre-sizing rules are now
+  split into a **safety** tuple and a **conviction** tuple, and a grant can only ever waive one
+  named policy from the second — asserted by name in a test, because moving `SecurityPolicy`
+  across is a one-line edit that would compile and let the programme buy rug pulls. Risk
+  remains the only authoriser (a grant is eligibility with a ceiling, never a decision);
+  Execution was not touched. Every exploration trade feeds the Knowledge Engine through the
+  ordinary Phase-1 loop and carries an `exploration=true` tag into its settled lesson, so what
+  the platform *learned* stays separable from what it *believed*. New table
+  `exploration_grants` (`0011_exploration_ledger`), read-only `/api/v1/exploration/*`,
+  `EXPLORATION_*` settings — **off by default**. Gate: **704 tests** (+45), `mypy --strict`
+  clean (456 files), `ruff` clean.
 
 - **2026-07-28** — **Phase 3 — the Candidate Enricher** (§6o). The decision path never touched
   permanent memory: the committee judged every token as though the platform had never seen

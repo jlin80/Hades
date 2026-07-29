@@ -47,6 +47,7 @@ from hades.contexts.risk.domain.events import (
 )
 from hades.contexts.risk.domain.models import (
     CircuitBreakerReason,
+    ExplorationGrant,
     KillSwitchLevel,
     PolicyOutcome,
     PortfolioRiskState,
@@ -61,7 +62,12 @@ from hades.contexts.risk.domain.models import (
     RiskSnapshot,
     SizingDecision,
 )
-from hades.contexts.risk.domain.ports import RiskAuditStore, RiskPolicy, RiskStateStore
+from hades.contexts.risk.domain.ports import (
+    ExplorationPort,
+    RiskAuditStore,
+    RiskPolicy,
+    RiskStateStore,
+)
 from hades.shared_kernel.domain.identifiers import new_id
 from hades.shared_kernel.events import EventBus
 from hades.shared_kernel.logging import get_logger
@@ -81,6 +87,8 @@ class RiskManager:
         allocation_policies: Sequence[RiskPolicy],
         kill_switch: KillSwitch,
         circuit_breaker: CircuitBreaker,
+        conviction_policies: Sequence[RiskPolicy] = (),
+        exploration: ExplorationPort | None = None,
         event_bus: EventBus | None = None,
         audit: RiskAuditStore | None = None,
         state_store: RiskStateStore | None = None,
@@ -89,7 +97,14 @@ class RiskManager:
     ) -> None:
         self._cfg = config
         self._sizing = sizing
+        # ``quality`` is the SAFETY tuple and ``conviction`` the waivable one.
+        # The split is the whole mechanism by which exploration cannot weaken a
+        # safety rule: the manager only ever consults ``_conviction`` when
+        # deciding what a grant may cover, so a rule placed in ``_quality``
+        # cannot be waived even by a caller who wants it to be.
         self._quality = tuple(quality_policies)
+        self._conviction = tuple(conviction_policies)
+        self._exploration = exploration
         self._allocation = tuple(allocation_policies)
         self._kill = kill_switch
         self._breaker = circuit_breaker
@@ -101,6 +116,7 @@ class RiskManager:
         self._emergency = False
         self._approvals = 0
         self._rejections = 0
+        self._exploration_approvals = 0
 
     # -- the approval chain ---------------------------------------------------
 
@@ -108,7 +124,7 @@ class RiskManager:
         """Run the full trade-approval chain for one candidate."""
         started = time.perf_counter()
         try:
-            assessment = self._decide(candidate, state)
+            assessment = await self._decide(candidate, state)
         except Exception as exc:  # a bad candidate must never crash the guardian
             if self._metrics is not None:
                 self._metrics.errors.inc()
@@ -126,13 +142,17 @@ class RiskManager:
         await self._publish(assessment, candidate)
         return assessment
 
-    def _decide(self, candidate: RiskCandidate, state: PortfolioRiskState) -> RiskAssessment:
-        # 1. Global gates - the whole book, before anything token-specific.
+    async def _decide(self, candidate: RiskCandidate, state: PortfolioRiskState) -> RiskAssessment:
+        # 1. Global gates - the whole book, before anything token-specific. The
+        #    defence layer is never waivable: an exploration trade under an open
+        #    circuit breaker or an engaged kill switch is still a trade, and the
+        #    reason those halts exist does not care how small it is.
         gate = self._global_gate(candidate, state)
         if gate is not None:
             return gate
 
-        # 2. Quality policies - is the opportunity itself good enough?
+        # 2. SAFETY policies - is the token itself fit to touch at any size?
+        #    Security, developer, wallet, liquidity. Nothing waives these.
         for policy in self._quality:
             outcome = policy.evaluate(candidate, state, 0.0)
             if not outcome.passed:
@@ -143,21 +163,48 @@ class RiskManager:
                     policies=(outcome,),
                 )
 
-        # 3. Position Sizing - dynamic, conviction-weighted, kill-switch-scaled.
-        ks = self._kill.state
-        sizing = self._sizing.size(
-            candidate,
-            equity_usd=state.capital.equity_usd,
-            available_usd=state.capital.available_usd,
-            kill_switch_factor=ks.size_factor,
-        )
+        # 3. CONVICTION policies - is the opportunity good enough to back? These
+        #    are the only rules an exploration grant may waive, and it may waive
+        #    one of them, named, at a fixed tiny size.
+        grant: ExplorationGrant | None = None
+        vetoed: PolicyOutcome | None = None
+        for policy in self._conviction:
+            outcome = policy.evaluate(candidate, state, 0.0)
+            if not outcome.passed:
+                vetoed = outcome
+                break
+        if vetoed is not None:
+            grant = await self._consider_exploration(candidate, vetoed)
+            if grant is None:
+                return self._reject(
+                    candidate,
+                    vetoed.reason or RiskRejectReason.TRADING_HALTED,
+                    vetoed.detail,
+                    policies=(vetoed,),
+                )
+
+        # 4. Position Sizing. Under a grant the size is the fixed exploration
+        #    sample, not a conviction-weighted amount - see PositionSizingEngine.
+        if grant is not None:
+            sizing = self._sizing.explore(grant, available_usd=state.capital.available_usd)
+        else:
+            sizing = self._sizing.size(
+                candidate,
+                equity_usd=state.capital.equity_usd,
+                available_usd=state.capital.available_usd,
+                kill_switch_factor=self._kill.state.size_factor,
+            )
         if not sizing.approved or sizing.sizing is None:
             return self._reject(
                 candidate, RiskRejectReason.POSITION_TOO_SMALL, sizing.detail, policies=()
             )
         notional = float(sizing.sizing.notional.amount)
 
-        # 4. Allocation policies - does the book have room for this size?
+        # 5. Allocation policies - does the book have room for this size? Run in
+        #    full for exploration too: the budget bounds what the programme may
+        #    spend, but the portfolio's capital, exposure, correlation, drawdown
+        #    and rate limits bound what the *book* will carry, and a cheap trade
+        #    is not exempt from either.
         passed: list[PolicyOutcome] = []
         for policy in self._allocation:
             outcome = policy.evaluate(candidate, state, notional)
@@ -170,8 +217,45 @@ class RiskManager:
                     policies=tuple(passed),
                 )
 
-        # 5. Approved.
-        return self._approve(candidate, sizing, tuple(passed))
+        # 6. Approved. The exploration budget is charged here and nowhere else:
+        #    a grant that got this far and was then vetoed above cost nothing.
+        assessment = self._approve(candidate, sizing, tuple(passed), grant=grant)
+        if grant is not None:
+            await self._charge_exploration(candidate, grant)
+        return assessment
+
+    async def _consider_exploration(
+        self, candidate: RiskCandidate, vetoed: PolicyOutcome
+    ) -> ExplorationGrant | None:
+        """Ask the exploration programme whether this veto is worth sampling.
+
+        Wrapped because the guardian's correctness must not depend on an optional
+        collaborator's: an exception here means *no grant*, so the candidate is
+        rejected exactly as it would have been if exploration did not exist.
+        Failing the other way - letting an error produce a trade - is the one
+        outcome this function may never have.
+        """
+        if self._exploration is None:
+            return None
+        try:
+            return await self._exploration.consider(candidate, waived_policy=vetoed.policy)
+        except Exception as exc:
+            if self._metrics is not None:
+                self._metrics.errors.inc()
+            _logger.warning(
+                "exploration_unavailable", mint=str(candidate.token.mint), error=str(exc)
+            )
+            return None
+
+    async def _charge_exploration(self, candidate: RiskCandidate, grant: ExplorationGrant) -> None:
+        if self._exploration is None:
+            return
+        try:
+            await self._exploration.commit(candidate, grant)
+        except Exception as exc:  # the trade is approved; the charge is not lost silently
+            _logger.error(
+                "exploration_charge_failed", mint=str(candidate.token.mint), error=str(exc)
+            )
 
     def _global_gate(
         self, candidate: RiskCandidate, state: PortfolioRiskState
@@ -201,19 +285,40 @@ class RiskManager:
     # -- assessment construction ----------------------------------------------
 
     def _approve(
-        self, candidate: RiskCandidate, sizing: SizingDecision, policies: tuple[PolicyOutcome, ...]
+        self,
+        candidate: RiskCandidate,
+        sizing: SizingDecision,
+        policies: tuple[PolicyOutcome, ...],
+        *,
+        grant: ExplorationGrant | None = None,
     ) -> RiskAssessment:
         assert sizing.sizing is not None
         notional = float(sizing.sizing.notional.amount)
         reasons = self._drivers(candidate) + self._caveats(candidate)
-        headline = (
-            f"Approved ${notional:.4f} (conviction {sizing.conviction:.2f}, "
-            f"P(ROI+) {candidate.prob_roi_positive:.2f}, risk ${sizing.risk_amount_usd:.2f})"
-        )
+        if grant is not None:
+            # An exploration approval must never read like a conviction one. The
+            # headline says so, and the reasons carry the arithmetic that bought
+            # the sample - including, first, the plain statement that this trade
+            # was not taken for its edge.
+            reasons = self._exploration_reasons(grant) + reasons
+            headline = (
+                f"Approved ${notional:.4f} as an EXPLORATION sample "
+                f"(P(ROI+) {candidate.prob_roi_positive:.2f}, waives "
+                f"{grant.waived_policy}; {grant.evidence_summary})"
+            )
+            self._exploration_approvals += 1
+            if self._metrics is not None:
+                self._metrics.exploration_approvals.inc()
+        else:
+            headline = (
+                f"Approved ${notional:.4f} (conviction {sizing.conviction:.2f}, "
+                f"P(ROI+) {candidate.prob_roi_positive:.2f}, risk ${sizing.risk_amount_usd:.2f})"
+            )
         self._approvals += 1
         if self._metrics is not None:
             self._metrics.approvals.inc()
         return RiskAssessment(
+            exploration=grant,
             token=candidate.token,
             at=datetime.now(UTC),
             decision=RiskDecision.APPROVE,
@@ -254,6 +359,29 @@ class RiskManager:
             kill_switch_level=int(self._kill.state.level),
             circuit_breaker_open=self._breaker.state.open,
             correlation_id=candidate.correlation_id,
+        )
+
+    @staticmethod
+    def _exploration_reasons(grant: ExplorationGrant) -> tuple[RiskReason, ...]:
+        """Spell out, in the decision itself, that this was bought not backed."""
+        cohort = (
+            f"cohort {grant.cohort_key} known from {grant.cohort_count} settled trades"
+            if grant.cohort_key
+            else "no cohort attribution - sampled against the global population"
+        )
+        return (
+            RiskReason(
+                kind=ReasonKind.CAVEAT,
+                text=(
+                    "EXPLORATION trade: taken to generate evidence, not for expected "
+                    f"return. Fixed size ${grant.notional_usd:.4f} on the independent "
+                    f"exploration budget; waives only '{grant.waived_policy}'"
+                ),
+            ),
+            RiskReason(kind=ReasonKind.CAVEAT, text=f"evidence: {grant.evidence_summary}"),
+            RiskReason(kind=ReasonKind.CAVEAT, text=f"budget: {grant.budget_summary}"),
+            RiskReason(kind=ReasonKind.DRIVER, text=cohort),
+            *(RiskReason(kind=ReasonKind.DRIVER, text=text) for text in grant.reasons),
         )
 
     @staticmethod
@@ -314,6 +442,12 @@ class RiskManager:
                     cluster=candidate.cluster,
                     narrative=candidate.narrative,
                     regime=candidate.regime,
+                    # Travels with the approval so the position, the fill and —
+                    # the point of the whole programme — the settled lesson can
+                    # all be attributed to the exploration budget that paid for
+                    # them. Without it the memory would hold the trade but not
+                    # the fact that it was bought to be learned from.
+                    exploration=assessment.is_exploration,
                     correlation_id_ref=candidate.correlation_id,
                 )
             )
@@ -492,6 +626,7 @@ class RiskManager:
             consecutive_losses=self._kill.state.consecutive_losses,
             approvals_session=self._approvals,
             rejections_session=self._rejections,
+            exploration_approvals_session=self._exploration_approvals,
         )
 
     async def _persist(self) -> None:

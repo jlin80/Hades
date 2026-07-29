@@ -25,6 +25,12 @@ authorises a trade**, and only the Execution Engine knows paper vs. live.
 > the decision path through the mandatory **Candidate Enricher**. Nothing reaches the AI
 > Committee without passing through it — `CommitteeManager.evaluate` accepts only an
 > `EnrichedCandidate`.
+>
+> **Updated 2026-07-29 (Phase 4).** The loop now has a way to *start*. The Risk Manager may
+> ask the new **Exploration** context (amber) about a candidate its *conviction* gates muted;
+> exploration answers with an eligibility grant at a fixed, tiny size on an independent
+> budget. It authorises nothing, waives no safety rule, and switches itself off when the
+> memory holds enough settled lessons on both sides of zero.
 
 ```mermaid
 flowchart TD
@@ -34,6 +40,7 @@ flowchart TD
     WI -->|WalletIntelligenceComputed| CE[Candidate Enricher]
     CE -->|EnrichedCandidate| AI[AI Committee]
     AI -->|CommitteePredictionGenerated| RK[Risk Manager]
+    RK <-.->|"conviction veto? → grant (fixed $, budgeted)"| XP[["exploration — cold start only"]]:::explore
     AI -->|CommitteePredictionGenerated| ST[Strategy Engine]
     ST -.->|EnsembleSignalGenerated| GAP1[["✗ no subscriber"]]:::broken
     RK -->|TradeApproved| EX[Execution Engine]
@@ -50,6 +57,8 @@ flowchart TD
     RK -.->|TradeApproved: FREEZE features| KN
     PF -.->|PositionOpened / PositionClosed| KN
     KN ==>|11 dimensions of history| CE
+    KN ==>|"settled lessons: enough yet?"| XP
+    XP -.->|ExplorationGranted / Spent / Completed| KN
     KN ==>|LessonLearned| KF[Knowledge Feedback]
     KF ==>|ground-truth samples| OS[(committee_outcomes)]
     SE -.->|TokenRejected| KF
@@ -59,6 +68,7 @@ flowchart TD
     classDef decide fill:#fee,stroke:#a88;
     classDef memory fill:#efe,stroke:#3a3,stroke-width:2px;
     classDef broken fill:#fdd,stroke:#c00,stroke-width:2px,stroke-dasharray: 4 4;
+    classDef explore fill:#ffeccc,stroke:#c80,stroke-width:2px;
     class SC,FE,SE,WI,CE,AI,ST quantify;
     class RK,EX decide;
 ```
@@ -66,6 +76,8 @@ flowchart TD
 - **Quantify (blue):** Scanner → … → AI Committee. Produce evidence; never decide.
 - **Decide (red):** Risk Manager (sole trade authoriser) → Execution Engine (sole
   mode-aware component).
+- **Explore (amber):** Exploration. Advises the guardian while the memory is empty; approves
+  nothing, is off by default, and ends by itself — see §1a.
 - **Remember (green):** Knowledge. Records from every producer; joins each decision with its
   realised outcome; **cannot act** — see §3a.
 - **Broken (dashed red):** the Strategy Engine's ensemble output still has no consumer.
@@ -106,6 +118,55 @@ The dependency is a **narrow read port the Learning context declares itself**
 (`CandidateHistoryPort`), satisfied by one adapter at Learning's edge that touches only
 Knowledge's *domain* layer. Knowledge still imports nothing; the arrow points Learning →
 Knowledge, so no cycle exists.
+
+### The exploration stage (added in Phase 4)
+
+The enricher makes the platform *use* what it knows; it does not create knowledge, and with an
+empty memory it is exactly neutral. So the first ground-truth samples still had to come from
+somewhere. They come from here.
+
+The Risk Manager's pre-sizing rules are now **two** tuples, and the split is the whole
+mechanism:
+
+```
+GLOBAL GATES   kill switch · circuit breaker · emergency     never waivable
+SAFETY         security · developer · wallet · liquidity     never waivable
+CONVICTION     min_probability · min_confidence              the only waivable pair
+SIZING         fixed exploration sample (not conviction-weighted)
+ALLOCATION     positions · capital · drawdown · exposure ·
+               correlation · risk budget · trade rate        never waivable
+```
+
+Only when a *conviction* policy vetoes does the guardian ask exploration whether the candidate
+is worth a sample. A grant waives that one named policy, sets a fixed dollar size, and is
+charged to an append-only ledger **on approval, not on grant** — so a grant the allocation
+rules then veto costs the programme nothing. Four independent budget ceilings (per trade, per
+day, per week, per lifetime) bound the spend; because the size is fixed, the lifetime budget
+states exactly how many samples can ever be bought.
+
+Three properties keep it safe to have on the decision path:
+
+1. **It cannot authorise.** `ExplorationGrant` has no approval field and no method returns
+   one; `TradeApproved` is still constructed in exactly one place. Exploration holds no
+   reference to the guardian and its isolation test forbids importing it, so it cannot call
+   back.
+2. **It cannot weaken safety.** The manager only consults the *conviction* tuple when deciding
+   what a grant covers. A rule added to the safety tuple next year is protected by default,
+   and `test_exploration_isolation` pins the membership of both tuples by name.
+3. **It cannot run forever.** Sufficiency is a stated condition — enough settled lessons, with
+   a minimum on *each* side of zero — evaluated on every request, and reaching it **latches**
+   the programme off and announces `ExplorationCompleted`. No operator action is required for
+   it to end, and no configuration keeps it running.
+
+Selection is deterministic: the candidate whose cohort permanent memory knows least about,
+ties broken by key name. No bandit, no ε-greedy, no randomness, no model — every verdict
+carries the arithmetic that produced it, and a person with the same three numbers can
+recompute it by hand.
+
+The dependency is a narrow port the **Risk Manager** declares (`ExplorationPort`, returning
+Risk's own `ExplorationGrant`), satisfied by an adapter at Risk's edge. Exploration in turn
+declares its own read port onto Knowledge's *domain*. The arrows run Risk → Exploration →
+Knowledge; there is no cycle.
 
 ### Contexts with no wiring
 
@@ -160,7 +221,7 @@ the **api**; Discord delivery in **notification**; periodic jobs (backups, clean
 ## 3. Context dependency & isolation map
 
 Contexts never import each other's internals — they communicate through domain events on
-the bus. Three isolation rules are **structurally enforced by tests**:
+the bus. Four isolation rules are **structurally enforced by tests**:
 
 ```mermaid
 flowchart TD
@@ -173,6 +234,10 @@ flowchart TD
 
     KN[knowledge] == AST-blocked ==x ANY[every other bounded context]
     KN --> SK
+
+    XP[exploration] == AST-blocked ==x EXEC
+    XP -. reads settled lessons .-> KNDOM[(knowledge domain)]
+    XP --> SK
 
     ALL[every context] --> SK
     NOTIF[notification] -. consumes NotificationRequested .- ALL
@@ -206,8 +271,17 @@ flowchart TD
   an enricher — so "no candidate is judged from scratch" is a property of the types, not of
   anyone's discipline. The same file pins the other half: with an empty memory the enrichment
   is *exactly* neutral, so the stage can never act as a hidden recalibration.
+- **Exploration isolation (verified, allowlist):** `tests/test_exploration_isolation.py`
+  asserts `contexts/exploration` imports nothing but the shared kernel and — from its
+  infrastructure edge only — Knowledge's *domain*. Execution, risk, portfolio, learning and
+  strategy are all unreachable. This context exists to *argue for* trades the guardian would
+  refuse, which is exactly why it must have no way to take one. The same file asserts that an
+  `ExplorationGrant` has no field expressing an approval, and that the Risk Manager's safety
+  policies are not in the waivable tuple.
 - **Single trade authoriser (verified):** `TradeApproved` is constructed in exactly one
-  place — `risk/application/manager.py`.
+  place — `risk/application/manager.py`. Exploration did not change that: a grant is
+  eligibility with a dollar ceiling on it, and the guardian runs every remaining rule after
+  receiving one.
 - **No two events share a routing key (verified):** the bus routes on the class name, so two
   contexts may not define an event with the same one. `contexts/research` and
   `contexts/strategy` both defined `StrategyPromoted`; they collided on one key and the
@@ -236,6 +310,7 @@ idempotent).
 | **portfolio** | `PositionOpened`, `PositionUpdated`, `TrailingStopAdjusted`, `PositionClosed`, `CapitalCommitted`/`Released`, `PortfolioUpdated` | Risk Manager, Monitoring, Notification |
 | **knowledge** | `KnowledgeRecorded`, `KnowledgeRejected`, `DecisionRecorded`, **`LessonLearned`** | AI Committee (`LessonLearned` → `committee_outcomes`) |
 | **research** ⚠️ renamed | `ExperimentStarted/Finished`, `BacktestCompleted`, `WalkForwardCompleted`, `MonteCarloCompleted`, `ReplayCompleted`, `ShadowStrategyUpdated`, `ModelCompared`, `StrategyCompared`, `FeatureProposed`, `CandidateProposed`, **`ResearchStrategyPromoted`** (was `StrategyPromoted` — it collided with the Strategy Engine's event of the same name), `PromotionRejected`, `ResearchReportGenerated` | **Knowledge** (all of them), Audit |
+| **exploration** | `ExplorationGranted`, `ExplorationSpent`, `ExplorationBudgetExhausted`, **`ExplorationCompleted`** | Knowledge (all of them), Notification (`BudgetExhausted` / `Completed`), Audit |
 | **notification** | `NotificationRequested` (consumed only by the Notification Service) | Notification Service → Discord |
 
 Cross-cutting consumers: **Audit** records promotions, weight changes, kill-switch /

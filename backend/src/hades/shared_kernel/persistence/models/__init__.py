@@ -16,6 +16,7 @@ from hades.shared_kernel.persistence.models.event_store import (
     DomainEventRecord,
     EventSnapshot,
 )
+from hades.shared_kernel.persistence.models.exploration import ExplorationGrantRecord
 from hades.shared_kernel.persistence.models.intelligence import (
     IntelClusterRecord,
     WalletHistoryRecord,
@@ -109,6 +110,7 @@ __all__ = [
     "EquityCurve",
     "EventSnapshot",
     "Experiment",
+    "ExplorationGrantRecord",
     "Feature",
     "HealthCheck",
     "IntelClusterRecord",

@@ -44,7 +44,7 @@ from hades.contexts.risk.domain.events import (
     RiskControlCommandIssued,
 )
 from hades.contexts.risk.domain.models import CircuitBreakerReason
-from hades.contexts.risk.domain.ports import RiskAuditStore, RiskStateStore
+from hades.contexts.risk.domain.ports import ExplorationPort, RiskAuditStore, RiskStateStore
 from hades.contexts.risk.infrastructure.context_builder import RiskContextBuilder
 from hades.contexts.risk.infrastructure.facts_cache import EventDrivenRiskFacts
 from hades.contexts.risk.infrastructure.stores import (
@@ -70,7 +70,7 @@ _STATUS_TTL_SECONDS = 30
 class RiskRuntime:
     """Owns the wired Portfolio + Risk subsystem and its lifecycle."""
 
-    def __init__(self, container: Container) -> None:
+    def __init__(self, container: Container, exploration: ExplorationPort | None = None) -> None:
         self._c = container
         self._stop = asyncio.Event()
         self._risk_metrics = RiskMetrics(container.metrics)
@@ -91,8 +91,12 @@ class RiskRuntime:
             history=self._history,
             state_store=self._portfolio_store,
         )
+        # The exploration programme is an optional collaborator the guardian may
+        # *ask*, never one that can approve. Absent (or disabled), the chain is
+        # bit-for-bit the one that ran before it existed.
         self._manager: RiskManager = build_risk_manager(
             risk_config_from_settings(container.settings),
+            exploration=exploration,
             event_bus=container.event_bus,
             audit=self._audit,
             state_store=self._state_store,
@@ -243,6 +247,10 @@ class RiskRuntime:
             "consecutive_losses": risk.consecutive_losses,
             "approvals_session": risk.approvals_session,
             "rejections_session": risk.rejections_session,
+            # Reported alongside, never folded in: a dashboard must not show
+            # "12 approvals" without saying that eleven were dollar-sized
+            # evidence purchases taken on the exploration budget.
+            "exploration_approvals_session": risk.exploration_approvals_session,
             "updated_at": time.time(),
         }
         metrics = self._portfolio.metrics()

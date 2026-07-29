@@ -22,6 +22,12 @@ from hades.contexts.execution.domain.events import (
     OrderSubmitted,
     TradingModeChanged,
 )
+from hades.contexts.exploration.domain.events import (
+    ExplorationBudgetExhausted,
+    ExplorationCompleted,
+    ExplorationGranted,
+    ExplorationSpent,
+)
 from hades.contexts.features.domain.events import FeaturesComputed
 from hades.contexts.intelligence.domain.events import (
     BehaviorChanged,
@@ -233,6 +239,14 @@ def _build_registry() -> EventRegistry:
         KnowledgeRejected,
         DecisionRecorded,
         LessonLearned,
+        # Exploration events (the cold-start programme's public record). None
+        # of these is a trade instruction and none can become one: the strongest
+        # thing an ExplorationGranted says is that the Risk Manager was allowed
+        # to *consider* a candidate under exploration rules.
+        ExplorationGranted,
+        ExplorationSpent,
+        ExplorationBudgetExhausted,
+        ExplorationCompleted,
         # AI Committee (Learning) events.
         InferenceCompleted,
         ConfidenceCalculated,

@@ -19,6 +19,7 @@ from hades.bootstrap import Container
 from hades.ops.audit_runtime import AuditRuntime
 from hades.ops.committee_runtime import CommitteeRuntime
 from hades.ops.execution_runtime import ExecutionRuntime
+from hades.ops.exploration_runtime import ExplorationRuntime
 from hades.ops.intelligence_runtime import IntelligenceRuntime
 from hades.ops.knowledge_runtime import KnowledgeRuntime
 from hades.ops.performance_runtime import PerformanceRuntime
@@ -48,6 +49,7 @@ class Worker(ServiceProcess):
         self._execution: ExecutionRuntime | None = None
         self._research: ResearchRuntime | None = None
         self._knowledge: KnowledgeRuntime | None = None
+        self._exploration: ExplorationRuntime | None = None
 
     async def setup(self) -> None:
         # The Audit trail is a platform concern: subscribe it first so every
@@ -115,12 +117,22 @@ class Worker(ServiceProcess):
         else:
             self._log.info("strategy_disabled")
 
+        # The exploration programme is built before the Risk Manager because the
+        # guardian holds it as a collaborator. It is built even when disabled: a
+        # disabled programme still answers "why are you off?" and still serves
+        # its status endpoint, so an operator can read the evidence census and
+        # the budget *before* deciding to switch it on. It spends nothing, runs
+        # no loop that touches a token, and cannot approve anything — the Risk
+        # Manager may only ask it about a candidate its conviction gates muted.
+        self._exploration = ExplorationRuntime(self._container)
+        self._tasks.extend(await self._exploration.start())
+
         # The Risk Manager reacts to CommitteePredictionGenerated (the end of the
         # pipeline) and the Portfolio Manager to the Position stream. The Risk
         # Manager is the only component that may approve a trade; it never
         # executes one.
         if self._container.settings.risk.enabled:
-            self._risk = RiskRuntime(self._container)
+            self._risk = RiskRuntime(self._container, self._exploration.risk_port)
             self._tasks.extend(await self._risk.start())
         else:
             self._log.info("risk_disabled")
@@ -158,6 +170,12 @@ class Worker(ServiceProcess):
             execution="running" if self._execution else "off",
             research="running" if self._research else "off",
             knowledge="running" if self._knowledge else "off",
+            exploration=(
+                "granting"
+                if self._exploration is not None
+                and self._container.settings.exploration.enabled
+                else "off"
+            ),
         )
 
     async def teardown(self) -> None:
@@ -183,3 +201,5 @@ class Worker(ServiceProcess):
             await self._research.stop()
         if self._knowledge is not None:
             await self._knowledge.stop()
+        if self._exploration is not None:
+            await self._exploration.stop()

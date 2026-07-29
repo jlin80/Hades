@@ -427,6 +427,45 @@ class SizingDecision(ValueObject):
     detail: str = ""
 
 
+class ExplorationGrant(ValueObject):
+    """Permission to judge a candidate under *exploration* rules, at a tiny size.
+
+    A grant is the Exploration context's answer to a single question the Risk
+    Manager asks it: "the conviction gate vetoed this one — is it worth a
+    fixed-size sample anyway, on the exploration budget?" It is the weakest thing
+    a collaborator can hand the guardian:
+
+    * It waives **exactly one named policy**, and only ever one from the
+      conviction tuple. Safety rules are not in that tuple and there is no field
+      here that could name one.
+    * It carries a size the Risk Manager must use *instead of* its own sizing,
+      never in addition to it. Exploration does not scale with conviction, which
+      is the entire point: the size is fixed so the budget states, in advance,
+      how many samples it can buy.
+    * It authorises nothing. Every allocation rule still runs afterwards — the
+      book's capital, exposure, correlation, drawdown and rate limits are as
+      binding for an exploration trade as for any other — and the Risk Manager
+      remains the only component that can approve.
+
+    The prose fields are not decoration. A trade taken to answer a question has
+    to be able to state, months later, which question and on what arithmetic;
+    they travel into the assessment, the audit store and permanent memory.
+    """
+
+    notional_usd: float
+    stop_loss_pct: float
+    take_profit_pct: float
+    #: The single conviction policy this grant waives, by name.
+    waived_policy: str
+    #: The cohort whose thin sample justified the trade (``None`` = the global
+    #: population, for a candidate with no attribution).
+    cohort_key: str | None = None
+    cohort_count: int = 0
+    evidence_summary: str = ""
+    budget_summary: str = ""
+    reasons: tuple[str, ...] = ()
+
+
 class PolicyOutcome(ValueObject):
     """One risk rule's verdict on a candidate. Any failure vetoes the trade."""
 
@@ -465,6 +504,15 @@ class RiskAssessment(ValueObject):
     kill_switch_level: int = 0
     circuit_breaker_open: bool = False
     correlation_id: str | None = None
+    #: Set when this decision was taken under the exploration programme. Kept on
+    #: the assessment (and therefore in the audit store) because a trade sized
+    #: for evidence rather than for edge must never be readable, afterwards, as
+    #: an ordinary conviction trade that happened to be small.
+    exploration: ExplorationGrant | None = None
+
+    @property
+    def is_exploration(self) -> bool:
+        return self.exploration is not None
 
     @property
     def approved(self) -> bool:
@@ -548,6 +596,10 @@ class RiskSnapshot(ValueObject):
     consecutive_losses: int = 0
     approvals_session: int = 0
     rejections_session: int = 0
+    #: How many of ``approvals_session`` were exploration samples. Reported
+    #: separately so a dashboard never presents "12 approvals" without the fact
+    #: that eleven of them were dollar-sized evidence purchases.
+    exploration_approvals_session: int = 0
 
 
 class RiskConfig(ValueObject):

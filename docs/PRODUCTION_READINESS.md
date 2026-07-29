@@ -21,10 +21,10 @@ Companion documents: the living reference [`../hades.md`](../hades.md), the arch
 | | |
 |---|---|
 | Overall posture | **READY (paper) · NOT-LIVE by construction** |
-| Backend health | **659 tests passing**, `mypy --strict` clean (439 files), `ruff` clean (0 findings), suite runs **warnings-as-errors** |
+| Backend health | **704 tests passing**, `mypy --strict` clean (456 files), `ruff` clean (0 findings), suite runs **warnings-as-errors** |
 | Trading mode | Paper only; live hard-gated (env gate × 2 + readiness checklist + explicit confirm + authenticated operator) and unbuildable (no live adapters) |
 | Deployment | Turnkey: `git clone → configure .env → docker compose up -d` (schema auto-migrated) |
-| Codebase | 19 bounded contexts · 60 tables / 10 migrations · React dashboard · Docker/Compose · Prometheus/Grafana |
+| Codebase | 20 bounded contexts · 61 tables / 11 migrations · React dashboard · Docker/Compose · Prometheus/Grafana |
 | Money-safety invariants | **Verified at source** (single trade authoriser, fail-closed everywhere, research structurally isolated, wallet layer never touches keys) |
 
 ## 2. Final architecture
@@ -73,12 +73,14 @@ See [`architecture.md`](architecture.md) for the flow, service, dependency and e
 
 ## 4. Test coverage
 
-- **659 backend tests**, all green, run **warnings-as-errors**; `mypy --strict` clean across
-  all 439 source files; `ruff` clean.
+- **704 backend tests**, all green, run **warnings-as-errors**; `mypy --strict` clean across
+  all 456 source files; `ruff` clean.
 - Coverage is **behavioural and invariant-focused**, which matters more than a line-count
   percentage for a safety-critical system: money-safety invariants, fail-closed paths, the
-  research-isolation AST check, the paper/live seam, schema integrity, and now the
-  realized-PnL fee accounting and the go-LIVE authentication guard.
+  research-isolation AST check, the paper/live seam, schema integrity, the realized-PnL fee
+  accounting, the go-LIVE authentication guard, and now the exploration programme's four
+  safety properties (it waives only conviction; it ends by itself; it cannot overspend across
+  a restart; it stays reproducible by hand).
 - **Not yet executed** (require a live Docker stack; no numbers are fabricated): load/stress
   testing, resilience/chaos testing, and CPU/RAM/latency profiling.
 
@@ -203,10 +205,55 @@ the token in front of it, because what a memory cannot know is what has changed 
 `unavailable`, because a young platform and a broken one looking identical is the single most
 expensive failure mode this codebase has had.
 
-**Still open:** the enricher makes the platform *use* what it has learned; it does not create
-knowledge. The first settled trades still have to come from somewhere — the deliberate
-bootstrap policy (audit Phase 2) remains open, and remains a different thing from
-recalibrating thresholds.
+**Still open at the time:** the enricher makes the platform *use* what it has learned; it does
+not create knowledge. The first settled trades still had to come from somewhere — that is the
+deliberate bootstrap policy, now built as Phase 4 (§7d).
+
+## 7d. Closed in Phase 4 — Exploration Mode (2026-07-29)
+
+The deliberate bootstrap policy the audit asked for, built as a bounded context that is **off
+by default** and cannot outlive its purpose.
+
+| Was | Now |
+|---|---|
+| The cold start could only be broken by lowering `RISK_MIN_PROB_ROI_POSITIVE` — for **all** capital, permanently, on the strength of no evidence | A separate, budgeted path takes deliberately tiny samples while the memory is demonstrably short, and stops |
+| No accounting existed for "trades taken to learn" — they would have been indistinguishable from a strategy losing small | An independent append-only ledger, a distinct knowledge source, an `exploration=true` tag on the settled lesson, and a separate approval metric |
+| Nothing in the platform could decide it had *enough* evidence | `EvidenceStatus.sufficient` — a stated condition on settled lessons **and both classes** — evaluated on every request, latching the programme off when met |
+
+**What it may waive, and what it may not.** Exactly one named policy, and only from the Risk
+Manager's new *conviction* tuple (`min_probability`, `min_confidence`). The safety tuple
+(security, developer, wallet, liquidity), the global defence layer (kill switch, circuit
+breaker, emergency) and every allocation rule (capital, exposure, correlation, drawdown, rate
+limits) apply unchanged. The split lives in one composition function and is asserted by name
+in `test_exploration_isolation`, because moving `SecurityPolicy` across is a one-line edit that
+would compile, pass every other test, and let the programme buy rug pulls a dollar at a time.
+
+**Money-safety invariants unchanged.** `TradeApproved` is still constructed in exactly one
+place; a grant is *eligibility with a dollar ceiling*, expressed in Risk's own vocabulary
+through a port Risk declares, and a test asserts the grant type has no field that could
+express an approval. The Execution Engine was not modified. Exploration holds no reference to
+the guardian and an AST test forbids it importing execution, risk, portfolio, learning or
+strategy — necessary, because this is the one context on the platform whose purpose is to
+argue for trades the guardian would refuse.
+
+**Budget posture.** Four independent ceilings (per trade, per day, per week, per lifetime),
+all derived by aggregating an append-only table rather than from a counter — an in-memory
+total would reset on restart and silently re-authorise the day's budget on every deploy. The
+size is *fixed*, not conviction-weighted, so the lifetime budget states exactly how many
+samples the programme can ever fund. The charge happens on approval, not on grant, so a grant
+the allocation rules then veto costs nothing.
+
+**Failure posture, and it is fail-closed in both directions.** An unreadable memory yields
+`available=False` and declines (not knowing whether more evidence is needed is a reason to
+stop spending, never to continue). An exception anywhere in the programme yields no grant, so
+the candidate is rejected exactly as it would have been if exploration did not exist — pinned
+by a test, because failing the other way is the one outcome this may never have.
+
+**Explainability.** No bandit, no ε-greedy, no randomness, no model. Selection is the
+candidate whose cohort the memory knows least about, ties broken by key name; a test asserts
+twenty-five evaluations of the same inputs give the same verdict. Every verdict and every
+approval carries the arithmetic behind it, and an exploration approval is never readable as an
+ordinary conviction trade that happened to be small.
 
 ## 8. Known limitations
 
@@ -227,8 +274,13 @@ recalibrating thresholds.
    and nobody subscribes, so fifteen strategies and the whole weighting apparatus influence
    no decision. Not a safety issue; it is dead weight presented as a pipeline stage. Connect
    it or freeze it explicitly.
-8. **Cold start is unblocked, not resolved** — see §7a. The memory reports `is_trainable`
-   honestly, and until the platform accumulates both classes it will say `false`.
+8. **Cold start is now addressed, not yet resolved** — see §7a and §7d. The loop is closed,
+   the brain reads the memory, and Exploration Mode exists to buy the first ground-truth
+   samples on a bounded budget. But it is **off by default**, and until an operator enables it
+   with a budget and the platform actually settles trades on both sides of zero,
+   `is_trainable` will keep saying `false` — honestly. A programme that spends its whole
+   lifetime budget without reaching sufficiency ends with a warning to the operator; the
+   answer to that is a judgement about the platform, not a larger budget applied quietly.
 
 ## 9. Recommendations for Hades v2 (pre-LIVE roadmap)
 

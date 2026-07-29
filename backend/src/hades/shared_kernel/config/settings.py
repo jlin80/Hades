@@ -661,6 +661,72 @@ class KnowledgeSettings(_Section):
     auto_ingest: bool = False
 
 
+class ExplorationSettings(_Section):
+    """Exploration — the budgeted, self-terminating answer to the cold start.
+
+    This section does not exist to make money. It exists to buy the platform its
+    first ground-truth samples, at a price fixed here in advance, during the only
+    period in which the memory has none. Everything about it is a ceiling.
+
+    It is **off by default** and stays off until an operator sets a budget they
+    are content to lose, because that is what the programme spends it on: the
+    trades are chosen for what they will teach, not for their expected return.
+
+    Three properties are worth knowing before turning it on:
+
+    * It waives **only** the AI Committee's conviction gates (probability and
+      confidence). Every safety rule — security, developer, wallet, liquidity,
+      kill switch, circuit breaker, drawdown, exposure, capital — applies in full
+      and unchanged, and the Risk Manager remains the sole authoriser.
+    * It **switches itself off**. When the memory holds ``target_lessons``
+      settled trades with at least ``target_per_class`` on each side of zero, the
+      programme latches off and announces it. No operator action is required for
+      it to end.
+    * Its size is **fixed**, not conviction-weighted: every exploration trade
+      costs ``per_trade_usd``, so ``total_budget_usd`` states exactly how many
+      trades the programme can ever fund.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="EXPLORATION_", extra="ignore", env_file=".env")
+
+    enabled: bool = False
+    # -- the budget (four independent ceilings) --------------------------------
+    #: Fixed size of every exploration trade. Deliberately not a maximum: a size
+    #: that grew with conviction would reintroduce the belief the programme
+    #: exists to test.
+    per_trade_usd: float = 1.0
+    daily_budget_usd: float = 10.0
+    weekly_budget_usd: float = 40.0
+    #: Lifetime ceiling. This one never resets, and it is the number that bounds
+    #: what the whole programme can cost.
+    total_budget_usd: float = 250.0
+    max_trades_per_day: int = 10
+    max_trades_per_week: int = 40
+    # -- when it stops ---------------------------------------------------------
+    target_lessons: int = 60
+    #: Minimum settled trades on *each* side of zero. Not redundant with the
+    #: total: 60 lessons that are all losses are a single-class dataset, whose
+    #: AUC is undefined and against which no model can be validated.
+    target_per_class: int = 15
+    #: Settled lessons at which a cohort (developer / launchpad / narrative /
+    #: cluster) stops being worth sampling. Drives selection, not shutdown.
+    cohort_target: int = 8
+    # -- which candidates it samples -------------------------------------------
+    #: Floor: below this the candidate is not an open question, it is a bad one.
+    min_prob_roi_positive: float = 0.35
+    #: Ceiling: above this the production path judges the candidate on its own,
+    #: and spending exploration budget there would flatter the programme with a
+    #: trade the platform was going to make anyway.
+    max_prob_roi_positive: float = 0.55
+    min_confidence: float = 0.15
+    # -- the risk envelope of an exploration trade -----------------------------
+    #: Tighter than production by default: the point is to learn what happens,
+    #: and a wide stop turns a cheap question into an expensive one.
+    stop_loss_pct: float = 12.0
+    take_profit_pct: float = 30.0
+    status_interval_seconds: float = 10.0
+
+
 class ResearchSettings(_Section):
     """Research Lab — the independent, offline R&D environment.
 
@@ -860,6 +926,7 @@ class Settings(BaseSettings):
     learning: LearningSettings = Field(default_factory=LearningSettings)
     research: ResearchSettings = Field(default_factory=ResearchSettings)
     knowledge: KnowledgeSettings = Field(default_factory=KnowledgeSettings)
+    exploration: ExplorationSettings = Field(default_factory=ExplorationSettings)
     intelligence: IntelligenceSettings = Field(default_factory=IntelligenceSettings)
     strategy: StrategySettings = Field(default_factory=StrategySettings)
     timeouts: TimeoutSettings = Field(default_factory=TimeoutSettings)

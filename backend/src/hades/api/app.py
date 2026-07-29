@@ -22,6 +22,7 @@ from hades.api.routers import (
     committee,
     config,
     execution,
+    exploration,
     funnel,
     health,
     info,
@@ -131,6 +132,7 @@ def create_app() -> FastAPI:
     app.include_router(funnel.router)
     app.include_router(research.router)
     app.include_router(knowledge.router)
+    app.include_router(exploration.router)
     app.include_router(audit.router)
     app.include_router(ws_routes.router)
 

@@ -51,6 +51,11 @@ class KnowledgeSource(StrEnum):
     WALK_FORWARD = "walk_forward"
     MONTE_CARLO = "monte_carlo"
     EXECUTED_TRADE = "executed_trade"
+    #: The cold-start exploration programme observing itself: which candidates it
+    #: sampled, on what arithmetic, and what the budget cost. Kept apart from
+    #: ``paper_trading`` so an analysis can always separate the trades the
+    #: platform *believed in* from the ones it bought to find out.
+    EXPLORATION = "exploration"
 
 
 class KnowledgeKind(StrEnum):

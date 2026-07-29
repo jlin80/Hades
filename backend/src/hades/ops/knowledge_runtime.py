@@ -134,6 +134,21 @@ def _mint_of(payload: dict[str, Any]) -> str | None:
     return None
 
 
+def _subject_of(payload: dict[str, Any]) -> str | None:
+    """Read a producer's own ``subject`` field, for events with no ``TokenRef``.
+
+    Exploration names what it is talking about directly (a mint, or the
+    programme itself) rather than carrying a token: it is not a trading context
+    and has no such type. Without this the records would all be filed under a
+    fresh aggregate id and none of them would be findable by the token they are
+    about — present in the memory, and useless.
+    """
+    subject = payload.get("subject")
+    if isinstance(subject, str) and subject.strip():
+        return subject
+    return None
+
+
 def _money(payload: dict[str, Any], key: str) -> float | None:
     """Read a serialised ``Money`` as a float, or ``None`` if it is not one."""
     raw = payload.get(key)
@@ -370,6 +385,36 @@ class KnowledgeRuntime:
             Verification.SIMULATED,
             SubjectType.STRATEGY,
         ),
+        # The exploration programme observing itself. An assessment, not an
+        # outcome: a grant is the platform deciding to buy a sample, and what
+        # the sample *taught* arrives later as a settled lesson like any other.
+        "ExplorationGranted": (
+            KnowledgeSource.EXPLORATION,
+            KnowledgeKind.ASSESSMENT,
+            Verification.SIMULATED,
+            SubjectType.TOKEN,
+        ),
+        "ExplorationSpent": (
+            KnowledgeSource.EXPLORATION,
+            KnowledgeKind.OBSERVATION,
+            Verification.REALISED,
+            SubjectType.TOKEN,
+        ),
+        # Both of these are statements about the programme, not about a token —
+        # which is exactly why they are worth keeping. Read back months later
+        # they say when the platform stopped guessing and why.
+        "ExplorationBudgetExhausted": (
+            KnowledgeSource.EXPLORATION,
+            KnowledgeKind.OBSERVATION,
+            Verification.REALISED,
+            SubjectType.PLATFORM,
+        ),
+        "ExplorationCompleted": (
+            KnowledgeSource.EXPLORATION,
+            KnowledgeKind.OBSERVATION,
+            Verification.REALISED,
+            SubjectType.PLATFORM,
+        ),
         # Executed operations — settled reality. Paper fills are simulated, but
         # the price path they settled against was the real market, so a closed
         # paper trade is ground truth about the market's behaviour.
@@ -413,7 +458,7 @@ class KnowledgeRuntime:
             payload = envelope["payload"]
             if not isinstance(payload, dict):
                 payload = {"value": payload}
-            subject = _mint_of(payload) or str(envelope["aggregate_id"])
+            subject = _mint_of(payload) or _subject_of(payload) or str(envelope["aggregate_id"])
             await self._recorder.record(
                 [
                     KnowledgeEnvelope(
@@ -728,6 +773,14 @@ def _tags_of(payload: dict[str, Any]) -> dict[str, str]:
         value = payload.get(key)
         if isinstance(value, str) and value:
             out[key] = value
+    # Whether the exploration budget paid for this trade. It has to survive all
+    # the way to the settled lesson or the platform cannot afterwards separate
+    # what it learned from what it believed: a programme of deliberate,
+    # dollar-sized samples would otherwise be indistinguishable, in the training
+    # ledger and in every performance figure derived from it, from a strategy
+    # that simply lost small a lot.
+    if payload.get("exploration") is True:
+        out["exploration"] = "true"
     return out
 
 
