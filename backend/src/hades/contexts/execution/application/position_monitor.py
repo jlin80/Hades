@@ -81,6 +81,9 @@ class _Monitored:
     trailing_armed: bool = False
     #: Set once an exit order is in flight so a slow fill cannot be double-sold.
     exiting: bool = False
+    #: When the latch above was set, so a latch that never clears can be caught.
+    #: ``0.0`` means "not latched".
+    exiting_since: float = 0.0
     opened_at: float = field(default_factory=time.monotonic)
 
     def take_profit_price(self) -> Decimal:
@@ -108,6 +111,7 @@ class PositionMonitor:
         interval_seconds: float = 5.0,
         max_slippage_bps: int = 300,
         honour_strategy_exits: bool = False,
+        exit_latch_timeout_seconds: float = 120.0,
     ) -> None:
         self._engine = engine
         self._oracle = price_oracle
@@ -118,6 +122,9 @@ class PositionMonitor:
         # honoured here. Off by default: the same flag turns both directions on,
         # so an operator enabling the Strategy Engine gets one switch, not two.
         self._honour_strategy_exits = honour_strategy_exits
+        # How long an exit may stay in flight before the latch is force-released.
+        # Generous relative to a fill, tiny relative to "forever".
+        self._exit_latch_timeout = max(10.0, exit_latch_timeout_seconds)
         self._positions: dict[str, _Monitored] = {}
         self._requested_exits: dict[str, str] = {}
         self._stop = asyncio.Event()
@@ -282,6 +289,7 @@ class PositionMonitor:
 
     async def tick(self) -> None:
         """Price the book once: mark every position, then exit those breached."""
+        self._release_stuck_latches()
         open_positions = [p for p in self._positions.values() if not p.exiting]
         if not open_positions:
             return
@@ -329,6 +337,41 @@ class PositionMonitor:
                     mint=str(position.token.mint),
                     error=str(exc),
                 )
+
+    def _release_stuck_latches(self) -> None:
+        """Free any position whose exit latch has outlived a plausible fill.
+
+        Defence in depth, deliberately independent of *why* the latch stuck. The
+        specific bug this was written for is fixed above, but the failure mode it
+        produced — a position quietly excluded from every tick, unmarked and
+        unexitable, with nothing logged — is severe enough that it should not
+        depend on one code path staying correct. Any future path that strands the
+        latch is caught here within a bounded time and says so loudly.
+        """
+        now = time.monotonic()
+        for position in self._positions.values():
+            if not position.exiting or position.exiting_since <= 0.0:
+                continue
+            waited = now - position.exiting_since
+            if waited < self._exit_latch_timeout:
+                continue
+            self._unlatch(position, f"latch stuck for {waited:.0f}s")
+            _logger.error(
+                "position_exit_latch_released",
+                position_id=position.position_id,
+                mint=str(position.token.mint),
+                waited_seconds=round(waited, 1),
+                note=(
+                    "an exit was latched and never completed; the position was "
+                    "invisible to the monitor until now"
+                ),
+            )
+
+    @staticmethod
+    def _unlatch(position: _Monitored, why: str) -> None:
+        position.exiting = False
+        position.exiting_since = 0.0
+        _logger.info("position_unlatched", position_id=position.position_id, why=why)
 
     async def _prices(self, tokens: set[TokenRef]) -> dict[str, Decimal]:
         batch = getattr(self._oracle, "prices_usd", None)
@@ -386,6 +429,7 @@ class PositionMonitor:
 
     async def _exit(self, position: _Monitored, price: Decimal, reason: str) -> None:
         position.exiting = True
+        position.exiting_since = time.monotonic()
         notional = position.quantity * price
         _logger.info(
             "position_exit_triggered",
@@ -405,17 +449,42 @@ class PositionMonitor:
             tags={TAG_EXIT_REASON: reason},
         )
         try:
-            await self._engine.execute(request)
+            fill = await self._engine.execute(request)
         except Exception as exc:
-            # The exit failed to execute; un-latch so the next cycle retries
-            # rather than stranding the position with nothing watching it.
-            position.exiting = False
+            # The exit raised; un-latch so the next cycle retries rather than
+            # stranding the position with nothing watching it.
+            self._unlatch(position, f"exit raised: {exc}")
             _logger.error(
                 "position_exit_failed",
                 position_id=position.position_id,
                 mint=str(position.token.mint),
                 reason=reason,
                 error=str(exc),
+            )
+            return
+
+        # The engine is deliberately fail-soft: a rejected or failed order comes
+        # back as a FillReport with ``filled`` false and is announced as
+        # ``OrderFailed`` — it does **not** raise. So the ``except`` above was
+        # unreachable for the ordinary failure, and the latch set at the top of
+        # this method was never cleared.
+        #
+        # The consequence was silent and permanent. A latched position is skipped
+        # by every subsequent tick, so it stopped being marked (its unrealised PnL
+        # froze at its last value), its stop-loss could never fire again, and no
+        # PositionClosed ever arrived to remove it. Nothing raised, nothing was
+        # logged, every component reported healthy, and the equity curve simply
+        # stopped moving — which is exactly the symptom this platform spent the
+        # audit chasing.
+        if not fill.filled:
+            self._unlatch(position, f"exit not filled: {fill.status.value}")
+            _logger.error(
+                "position_exit_not_filled",
+                position_id=position.position_id,
+                mint=str(position.token.mint),
+                reason=reason,
+                status=fill.status.value,
+                note="un-latched; the next priced tick will re-evaluate the envelope",
             )
 
 
