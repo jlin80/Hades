@@ -19,6 +19,7 @@ that owns the bus (worker / engine / watchdog / notification / scheduler).
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any
 
 import orjson
@@ -45,6 +46,9 @@ class RedisEventBus:
         consumer: str = "consumer-1",
         block_ms: int = 2000,
         batch: int = 50,
+        max_len: int = 250_000,
+        lag_warn_threshold: int = 5_000,
+        lag_check_interval_seconds: float = 60.0,
     ) -> None:
         self._provider = provider
         self._registry = registry
@@ -56,6 +60,10 @@ class RedisEventBus:
         self._handlers: dict[str, list[EventHandler]] = {}
         self._stop = asyncio.Event()
         self._group_ready = False
+        self._max_len = max(1_000, max_len)
+        self._lag_warn = max(1, lag_warn_threshold)
+        self._lag_interval = max(5.0, lag_check_interval_seconds)
+        self._last_lag_check = 0.0
 
     # --- EventBus interface ---------------------------------------------------
     def subscribe(self, event_type: str, handler: EventHandler) -> None:
@@ -64,9 +72,18 @@ class RedisEventBus:
 
     async def publish(self, event: DomainEvent) -> None:
         envelope = event.to_envelope()
+        # ``maxlen`` with ``approximate`` is what keeps the stream bounded. Without
+        # it the stream grows for as long as the platform runs: a live deployment
+        # reached 172k entries and 155 MB of Redis with no ``maxmemory`` set, which
+        # ends in an eviction or an OOM rather than in a warning. Approximate
+        # trimming lets Redis drop whole radix nodes, so the cost per publish is
+        # negligible — and the cap is far above any consumer's working set, so a
+        # briefly-behind consumer is never trimmed out from under it.
         await self._provider.client().xadd(
             self._stream,
             {"type": event.event_type, "data": orjson.dumps(envelope).decode()},
+            maxlen=self._max_len,
+            approximate=True,
         )
 
     async def publish_many(self, events: list[DomainEvent]) -> None:
@@ -104,6 +121,7 @@ class RedisEventBus:
                 _logger.warning("redis_bus_read_failed", error=str(exc))
                 await asyncio.sleep(1.0)
                 continue
+            await self._check_lag()
             if not response:
                 continue
             for _stream, messages in response:
@@ -112,6 +130,52 @@ class RedisEventBus:
                     await client.xack(  # type: ignore[no-untyped-call]
                         self._stream, self._group, message_id
                     )
+
+    async def _check_lag(self) -> None:
+        """Warn when this consumer group falls behind the stream.
+
+        A backlogged consumer is the most dangerous silent state this platform
+        has. One deployment ran **59 hours** behind: the decision path was
+        judging tokens from two days earlier, the portfolio's mark-to-market
+        events had not been reached so its unrealised PnL sat at exactly zero,
+        and every container reported healthy the whole time. Nothing anywhere
+        measured the gap, so the only evidence was a number nobody was reading.
+
+        Cheap by construction: one ``XINFO GROUPS`` per interval, and any failure
+        is swallowed — observability must never be able to stall the bus it
+        observes.
+        """
+        now = time.monotonic()
+        if now - self._last_lag_check < self._lag_interval:
+            return
+        self._last_lag_check = now
+        try:
+            groups = await self._provider.client().xinfo_groups(  # type: ignore[no-untyped-call]
+                self._stream
+            )
+        except Exception as exc:  # never let the watchdog break the thing watched
+            _logger.debug("redis_bus_lag_check_failed", error=str(exc))
+            return
+        for group in groups:
+            if group.get("name") != self._group:
+                continue
+            lag = group.get("lag")
+            pending = group.get("pending", 0)
+            if isinstance(lag, int) and lag > self._lag_warn:
+                _logger.error(
+                    "redis_bus_consumer_behind",
+                    group=self._group,
+                    lag=lag,
+                    pending=pending,
+                    threshold=self._lag_warn,
+                    note=(
+                        "this service is processing stale events; anything it decides "
+                        "is based on the past, and it will look healthy while doing so"
+                    ),
+                )
+            else:
+                _logger.debug("redis_bus_lag", group=self._group, lag=lag, pending=pending)
+            return
 
     async def _dispatch(self, fields: dict[str, Any]) -> None:
         event_type = fields.get("type", "")

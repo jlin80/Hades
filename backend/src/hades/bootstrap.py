@@ -328,6 +328,9 @@ def _build_event_bus(
             stream_prefix=settings.event_bus.stream_prefix,
             group=role,
             consumer=settings.instance_id,
+            max_len=settings.event_bus.stream_max_len,
+            lag_warn_threshold=settings.event_bus.lag_warn_threshold,
+            lag_check_interval_seconds=settings.event_bus.lag_check_interval_seconds,
         )
     logger.info("event_bus_selected", transport="in_memory")
     return InMemoryEventBus()

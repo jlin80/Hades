@@ -17,7 +17,7 @@
 | **Current phase** | **Phase 4 — Exploration Mode: the budgeted, self-terminating answer to the cold start (§6p)** |
 | **Version** | `0.10.0` |
 | **Trading** | Paper only. Live execution is hard-gated OFF (two switches), blocked by the Production Checklist (any failing required subsystem or an active Emergency Mode refuses the switch to LIVE), **and** — as of Stage 2 — the switch to LIVE additionally requires an authenticated operator (never the implicit `system` principal). The Execution Engine remains the *only* component that knows the mode; everything upstream is mode-agnostic. |
-| **Backend tests** | **733 passing** · `mypy --strict` clean (456 src files) · **`ruff` clean (0 findings)** · suite runs **warnings-as-errors** |
+| **Backend tests** | **738 passing** · `mypy --strict` clean (456 src files) · **`ruff` clean (0 findings)** · suite runs **warnings-as-errors** |
 | **Cold start** | **Resolvable and now addressed.** The learning loop is closed (§6m), the lab feeds it (§6n), the brain reads it (§6o), and a budgeted Exploration programme buys the first ground-truth samples and switches itself off when the memory has them (§6p). Exploration is **off by default** and waives only the AI Committee's conviction gates — never a safety rule, never the defence layer, never an allocation limit. |
 | **Deployment** | `docker compose up -d` is now a complete, no-manual-steps bring-up: a one-shot `migrate` service applies the schema to head before any app service starts. |
 
@@ -2204,6 +2204,51 @@ and this defect was silent by construction.
 
 ---
 
+## 6q. The consumer that fell 59 hours behind (2026-07-30)
+
+The portfolio's frozen unrealised PnL turned out to be a *symptom*, and the disease was worse
+than the symptom suggested.
+
+Measured live on the worker's consumer group:
+
+```
+group      pending   entries-read   lag
+worker         765         68,745    103,357   ← 59 hours behind
+watchdog       118        137,425     34,677
+engine           2        172,102          0
+```
+
+The stream held **172,122 entries** and **155 MB** of Redis, with no `MAXLEN` anywhere and no
+`maxmemory` configured.
+
+**What that meant.** The worker hosts the Scanner, Security, Intelligence, Committee, Strategy,
+Risk, Execution, Research, Knowledge and Exploration runtimes. A worker 59 hours behind is a
+platform whose *entire decision path* is judging tokens from two days earlier. The portfolio's
+`unrealized_pnl_usd` sat at exactly `0.0` simply because the `PositionUpdated` events published
+minutes earlier were still 103,357 entries away in its queue. Knowledge's growing observation
+count was not current activity either — it was a backlog draining slowly.
+
+And **nothing measured it.** Every container reported healthy, every log line was ordinary, and
+the only evidence was a number in `XINFO GROUPS` that nobody was reading. A local repro of the
+exact persisted production state proved the portfolio's own logic was correct all along: restore
+the snapshot, publish the event, and the PnL applies.
+
+**Two fixes, both about visibility as much as capacity:**
+
+1. **The stream is bounded.** `XADD` now carries `MAXLEN ~ EVENT_BUS_STREAM_MAX_LEN`. Approximate
+   trimming lets Redis drop whole radix nodes, so the cost per publish is negligible, and the cap
+   sits far above any consumer's working set so a briefly-behind consumer is never trimmed out
+   from under it.
+2. **The consumer watches itself.** Once per `EVENT_BUS_LAG_CHECK_INTERVAL_SECONDS` the bus reads
+   its own group's lag and logs an **error** above `EVENT_BUS_LAG_WARN_THRESHOLD`. One `XINFO`
+   per interval, and any failure is swallowed — observability must never be able to stall the bus
+   it observes.
+
+> The lesson is the one this whole audit keeps producing: the defect was not that a component
+> was slow. It was that being hours behind looked exactly like being healthy.
+
+---
+
 ## 7. Testing
 
 `backend/tests` (379 tests, all green; `mypy --strict` clean; `ruff` clean; suite runs
@@ -2431,6 +2476,12 @@ warnings-as-errors):
   *successful* exit stays latched so at-least-once delivery cannot double-sell; a latch that
   never clears is force-released and reported; and a freshly-latched exit is **not** released
   early, so the guard does not fight a fill legitimately in flight.
+
+- 2026-07-30 — the event bus, **+5 tests** in `test_event_infrastructure`: publishing **trims the
+  stream** and does so *approximately* (exact trimming would make every publish pay for a
+  full-stream scan); a **backlogged consumer logs an error**; a current one does not cry wolf; the
+  lag check is **rate-limited to one `XINFO` per interval**; and a failing lag check never breaks
+  the bus, because observability must not be able to stall what it observes.
 
 Everything is testable because every dependency is a port; in-memory adapters
 back the tests, real adapters back production. The frontend passes `tsc` and a

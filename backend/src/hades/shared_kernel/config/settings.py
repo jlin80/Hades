@@ -105,6 +105,18 @@ class EventBusSettings(_Section):
 
     transport: EventBusTransport = EventBusTransport.REDIS
     stream_prefix: str = "hades.events"
+    #: Approximate cap on the event stream. Without it the stream grows forever:
+    #: a live deployment reached 172k entries and 155 MB of Redis with no
+    #: `maxmemory` set, which ends as an eviction or an OOM rather than as a
+    #: warning. ``~`` trimming lets Redis drop whole nodes, so it is cheap.
+    stream_max_len: int = 250_000
+    #: Consumer lag (undelivered entries) above which the bus logs a warning.
+    #: A backlogged consumer is the most dangerous silent state this platform has:
+    #: every component reports healthy while the decision path judges tokens from
+    #: hours ago. One deployment ran 59 hours behind and nothing said so.
+    lag_warn_threshold: int = 5_000
+    #: How often the consumer checks its own lag, in seconds.
+    lag_check_interval_seconds: float = 60.0
 
 
 class ClickHouseSettings(_Section):
