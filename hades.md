@@ -17,7 +17,7 @@
 | **Current phase** | **Phase 4 — Exploration Mode: the budgeted, self-terminating answer to the cold start (§6p)** |
 | **Version** | `0.10.0` |
 | **Trading** | Paper only. Live execution is hard-gated OFF (two switches), blocked by the Production Checklist (any failing required subsystem or an active Emergency Mode refuses the switch to LIVE), **and** — as of Stage 2 — the switch to LIVE additionally requires an authenticated operator (never the implicit `system` principal). The Execution Engine remains the *only* component that knows the mode; everything upstream is mode-agnostic. |
-| **Backend tests** | **728 passing** · `mypy --strict` clean (456 src files) · **`ruff` clean (0 findings)** · suite runs **warnings-as-errors** |
+| **Backend tests** | **733 passing** · `mypy --strict` clean (456 src files) · **`ruff` clean (0 findings)** · suite runs **warnings-as-errors** |
 | **Cold start** | **Resolvable and now addressed.** The learning loop is closed (§6m), the lab feeds it (§6n), the brain reads it (§6o), and a budgeted Exploration programme buys the first ground-truth samples and switches itself off when the memory has them (§6p). Exploration is **off by default** and waives only the AI Committee's conviction gates — never a safety rule, never the defence layer, never an allocation limit. |
 | **Deployment** | `docker compose up -d` is now a complete, no-manual-steps bring-up: a one-shot `migrate` service applies the schema to head before any app service starts. |
 
@@ -2158,6 +2158,52 @@ otherwise — that gap is closed, and it is documented in
 
 ---
 
+## 6p. The exit latch that never cleared (2026-07-30)
+
+Found live, in production, on a position that had been open three days. It is the
+platform's own founding symptom — *"the dashboard looks healthy and the balance never
+moves"* — and this was the last mechanism still producing it.
+
+The evidence, gathered in order: the Position Monitor **had** resumed the position after the
+restart; the price oracle **did** quote the token (0.001877 against an entry of 0.0021916575,
+about 14% under water); `PositionUpdated` events **had** been published, 102 of them; and the
+book reported `unrealized_pnl_usd = 0.0` with equity pinned at exactly 1000.0. No exception,
+no error log, nine healthy containers.
+
+**The mechanism.** `PositionMonitor._exit()` latches `exiting = True` before submitting the
+SELL, so a slow fill cannot be double-sold. It cleared that latch in an `except` block. But
+`ExecutionEngine.execute()` is deliberately **fail-soft**: a rejected or failed order comes
+back as a `FillReport` with `filled=False` and is announced as `OrderFailed` — it does not
+raise. The un-latch path was therefore unreachable for the ordinary failure.
+
+A latched position is filtered out of every subsequent tick
+(`[p for p in self._positions.values() if not p.exiting]`). So one failed exit meant:
+
+* it was never marked again — unrealised PnL frozen at its last value, and the equity curve
+  simply stopped moving;
+* its stop-loss could never fire again — the loss the trade was sized around became
+  unreachable;
+* no `PositionClosed` ever arrived, so it was never removed, and its notional stayed
+  committed against every exposure limit indefinitely;
+* and **nothing said so**. This is the exact family the audit was written about: a component
+  that presents as operational while doing nothing.
+
+**The fix is two-layered.** `_exit()` now inspects the returned fill and un-latches on
+anything that is not a fill, logging `position_exit_not_filled` so the retry is visible.
+And, independently of *why* a latch might stick, `_release_stuck_latches()` runs each tick
+and force-releases any latch older than `exit_latch_timeout_seconds` (default 120) with an
+error. The specific bug is fixed; the failure mode it produced is severe enough that it
+should not depend on one code path staying correct.
+
+The latch keeps its original job: a successful exit stays latched, and a test asserts a
+second tick does not sell the same position twice.
+
+Every regression test here was run against the reintroduced bug and confirmed to **fail**
+without the fix. A test for a silent defect that passes either way is worse than no test,
+and this defect was silent by construction.
+
+---
+
 ## 7. Testing
 
 `backend/tests` (379 tests, all green; `mypy --strict` clean; `ruff` clean; suite runs
@@ -2377,6 +2423,14 @@ warnings-as-errors):
   type, with fakes that deliberately carry a `coef_`; the refusal says what to do instead; a
   feature Core does not produce is refused; every catalogue name is accepted; the meta-model's
   three heads; lab-only metrics travel as evidence; the bundle declares no status of its own).
+
+- 2026-07-30 — the exit latch, **+5 tests** in `test_position_monitor`: **a failed exit does
+  not strand the position** (the regression — a `FAILED` FillReport, which is how the engine
+  really reports failure, must un-latch so the next tick retries); **a failed exit keeps
+  marking the position** (the half actually observed in production: the PnL froze); a
+  *successful* exit stays latched so at-least-once delivery cannot double-sell; a latch that
+  never clears is force-released and reported; and a freshly-latched exit is **not** released
+  early, so the guard does not fight a fill legitimately in flight.
 
 Everything is testable because every dependency is a port; in-memory adapters
 back the tests, real adapters back production. The frontend passes `tsc` and a
