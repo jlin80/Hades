@@ -21,7 +21,7 @@ Companion documents: the living reference [`../hades.md`](../hades.md), the arch
 | | |
 |---|---|
 | Overall posture | **READY (paper) · NOT-LIVE by construction** |
-| Backend health | **738 tests passing**, `mypy --strict` clean (456 files), `ruff` clean (0 findings), suite runs **warnings-as-errors** |
+| Backend health | **742 tests passing**, `mypy --strict` clean (456 files), `ruff` clean (0 findings), suite runs **warnings-as-errors** |
 | Trading mode | Paper only; live hard-gated (env gate × 2 + readiness checklist + explicit confirm + authenticated operator) and unbuildable (no live adapters) |
 | Deployment | Turnkey: `git clone → configure .env → docker compose up -d` (schema auto-migrated) |
 | Codebase | 20 bounded contexts · 61 tables / 11 migrations · React dashboard · Docker/Compose · Prometheus/Grafana |
@@ -75,7 +75,7 @@ See [`architecture.md`](architecture.md) for the flow, service, dependency and e
 
 ## 4. Test coverage
 
-- **738 backend tests**, all green, run **warnings-as-errors**; `mypy --strict` clean across
+- **742 backend tests**, all green, run **warnings-as-errors**; `mypy --strict` clean across
   all 456 source files; `ruff` clean.
 - Coverage is **behavioural and invariant-focused**, which matters more than a line-count
   percentage for a safety-critical system: money-safety invariants, fail-closed paths, the

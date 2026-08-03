@@ -17,7 +17,7 @@
 | **Current phase** | **Phase 4 — Exploration Mode: the budgeted, self-terminating answer to the cold start (§6p)** |
 | **Version** | `0.10.0` |
 | **Trading** | Paper only. Live execution is hard-gated OFF (two switches), blocked by the Production Checklist (any failing required subsystem or an active Emergency Mode refuses the switch to LIVE), **and** — as of Stage 2 — the switch to LIVE additionally requires an authenticated operator (never the implicit `system` principal). The Execution Engine remains the *only* component that knows the mode; everything upstream is mode-agnostic. |
-| **Backend tests** | **738 passing** · `mypy --strict` clean (456 src files) · **`ruff` clean (0 findings)** · suite runs **warnings-as-errors** |
+| **Backend tests** | **742 passing** · `mypy --strict` clean (456 src files) · **`ruff` clean (0 findings)** · suite runs **warnings-as-errors** |
 | **Cold start** | **Resolvable and now addressed.** The learning loop is closed (§6m), the lab feeds it (§6n), the brain reads it (§6o), and a budgeted Exploration programme buys the first ground-truth samples and switches itself off when the memory has them (§6p). Exploration is **off by default** and waives only the AI Committee's conviction gates — never a safety rule, never the defence layer, never an allocation limit. |
 | **Deployment** | `docker compose up -d` is now a complete, no-manual-steps bring-up: a one-shot `migrate` service applies the schema to head before any app service starts. |
 
@@ -2243,6 +2243,14 @@ the snapshot, publish the event, and the PnL applies.
    its own group's lag and logs an **error** above `EVENT_BUS_LAG_WARN_THRESHOLD`. One `XINFO`
    per interval, and any failure is swallowed — observability must never be able to stall the bus
    it observes.
+3. **Orphaned messages are reclaimed.** A group's pending list is *per consumer*, and the
+   consumer name is the process's instance id, so a container killed mid-dispatch leaves its
+   in-flight messages assigned to a name that will never ack them. Nothing redelivers those on
+   its own: `XREADGROUP >` returns only new entries. The live deployment had accumulated **765**
+   such orphans across restarts — published, still in the stream, never handled. `XAUTOCLAIM`
+   now takes over anything idle beyond `EVENT_BUS_RECLAIM_AFTER_SECONDS`, dispatches it through
+   the normal handlers and acks it. Handlers have always been required to be idempotent (the bus
+   is at-least-once), so a reclaim that duplicates work is safe by contract.
 
 > The lesson is the one this whole audit keeps producing: the defect was not that a component
 > was slow. It was that being hours behind looked exactly like being healthy.
@@ -2481,7 +2489,16 @@ warnings-as-errors):
   stream** and does so *approximately* (exact trimming would make every publish pay for a
   full-stream scan); a **backlogged consumer logs an error**; a current one does not cry wolf; the
   lag check is **rate-limited to one `XINFO` per interval**; and a failing lag check never breaks
-  the bus, because observability must not be able to stall what it observes.
+  the bus, because observability must not be able to stall what it observes; **orphaned messages
+  are reclaimed and handled** (the regression — without it they are never processed at all), the
+  idle threshold is respected so a consumer merely mid-dispatch is not robbed, an empty pending
+  list is a silent no-op, and a failing reclaim never breaks the bus.
+- Also fixed a **latent flaky test**: `test_yesterdays_spend_does_not_count_against_today` asserted
+  that yesterday's spend still counts against the *week*, which is false whenever the suite runs
+  on a Monday — "yesterday" is then the previous ISO week. It passed six days out of seven and
+  failed on the seventh, which is worse than not testing it, because the failure reads as a
+  regression in the code rather than in the fixture. It now asserts the lifetime ceiling, which
+  is window-independent; `week_start` is correct and is covered by the weekly-ceiling tests.
 
 Everything is testable because every dependency is a port; in-memory adapters
 back the tests, real adapters back production. The frontend passes `tsc` and a

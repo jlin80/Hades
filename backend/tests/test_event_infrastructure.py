@@ -187,3 +187,86 @@ async def test_a_failing_lag_check_never_breaks_the_bus() -> None:
 
     bus = _redis_bus(_Broken(), lag_check_interval_seconds=0.0)
     await bus._check_lag()  # must not raise
+
+
+# --- reclaiming what a dead consumer never acked ------------------------------
+#
+# A group's pending list is per-consumer, and the consumer name is the process's
+# stable instance id. A container killed mid-dispatch — a deploy, an OOM, a
+# recreate — leaves its in-flight messages assigned to a name that will never ack
+# them, and nothing redelivers those: XREADGROUP ">" returns only new entries.
+# The live deployment had accumulated 765 such orphans across restarts, and they
+# were invisible: published, still in the stream, and never handled.
+
+
+class _ClaimingClient(_FakeRedisClient):
+    """Serves one batch of stale pending messages, then nothing."""
+
+    def __init__(self, claimed: list[tuple[str, dict[str, str]]]) -> None:
+        super().__init__()
+        self._claimed = claimed
+        self.autoclaims: list[dict[str, object]] = []
+        self.acked: list[str] = []
+
+    async def xautoclaim(self, stream: str, group: str, consumer: str, **kwargs: object):  # type: ignore[no-untyped-def]
+        self.autoclaims.append(kwargs)
+        batch, self._claimed = self._claimed, []
+        return ["0-0", batch, []]
+
+    async def xack(self, stream: str, group: str, message_id: str) -> int:
+        self.acked.append(message_id)
+        return 1
+
+
+def _envelope_fields(title: str) -> dict[str, str]:
+    import orjson
+
+    event = NotificationRequested(
+        aggregate_id=new_id(), title=title, body="b", severity=Severity.INFO
+    )
+    return {"type": "NotificationRequested", "data": orjson.dumps(event.to_envelope()).decode()}
+
+
+async def test_orphaned_messages_are_reclaimed_and_handled() -> None:
+    """The regression: without this they are simply never processed."""
+    client = _ClaimingClient([("1-1", _envelope_fields("orphan"))])
+    bus = _redis_bus(client, reclaim_after_seconds=60.0)
+
+    seen: list[str] = []
+
+    async def handler(event) -> None:  # type: ignore[no-untyped-def]
+        seen.append(event.title)
+
+    bus.subscribe("NotificationRequested", handler)
+    await bus._reclaim_stale()
+
+    assert seen == ["orphan"], "a reclaimed message must go through the normal handlers"
+    assert client.acked == ["1-1"], "and must be acked, or it is reclaimed forever"
+
+
+async def test_reclaiming_respects_the_idle_threshold() -> None:
+    """It must not steal work from a consumer that is merely mid-dispatch."""
+    client = _ClaimingClient([])
+    bus = _redis_bus(client, reclaim_after_seconds=300.0)
+
+    await bus._reclaim_stale()
+
+    assert client.autoclaims[0]["min_idle_time"] == 300_000
+
+
+async def test_nothing_pending_is_a_silent_no_op() -> None:
+    client = _ClaimingClient([])
+    bus = _redis_bus(client, reclaim_after_seconds=60.0)
+
+    await bus._reclaim_stale()
+
+    assert client.acked == []
+
+
+async def test_a_failing_reclaim_never_breaks_the_bus() -> None:
+    class _Broken(_FakeRedisClient):
+        async def xautoclaim(self, *a: object, **k: object):  # type: ignore[no-untyped-def]
+            raise RuntimeError("redis is down")
+
+    bus = _redis_bus(_Broken())
+    await bus._reclaim_stale()  # must not raise

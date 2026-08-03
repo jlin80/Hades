@@ -331,6 +331,7 @@ def _build_event_bus(
             max_len=settings.event_bus.stream_max_len,
             lag_warn_threshold=settings.event_bus.lag_warn_threshold,
             lag_check_interval_seconds=settings.event_bus.lag_check_interval_seconds,
+            reclaim_after_seconds=settings.event_bus.reclaim_after_seconds,
         )
     logger.info("event_bus_selected", transport="in_memory")
     return InMemoryEventBus()

@@ -117,6 +117,12 @@ class EventBusSettings(_Section):
     lag_warn_threshold: int = 5_000
     #: How often the consumer checks its own lag, in seconds.
     lag_check_interval_seconds: float = 60.0
+    #: How long a delivered-but-unacked message may sit before another consumer
+    #: takes it over. A container killed mid-dispatch leaves its in-flight
+    #: messages assigned to a consumer name that will never ack them, and nothing
+    #: redelivers those on its own — `XREADGROUP >` returns only new entries.
+    #: One deployment had accumulated 765 such orphans across restarts.
+    reclaim_after_seconds: float = 300.0
 
 
 class ClickHouseSettings(_Section):

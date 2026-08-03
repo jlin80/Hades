@@ -49,6 +49,7 @@ class RedisEventBus:
         max_len: int = 250_000,
         lag_warn_threshold: int = 5_000,
         lag_check_interval_seconds: float = 60.0,
+        reclaim_after_seconds: float = 300.0,
     ) -> None:
         self._provider = provider
         self._registry = registry
@@ -64,6 +65,11 @@ class RedisEventBus:
         self._lag_warn = max(1, lag_warn_threshold)
         self._lag_interval = max(5.0, lag_check_interval_seconds)
         self._last_lag_check = 0.0
+        # How long a delivered-but-unacked message may sit before another
+        # consumer takes it over. Comfortably longer than any handler chain,
+        # short enough that a crashed process does not strand work for a day.
+        self._reclaim_after_ms = int(max(30.0, reclaim_after_seconds) * 1000)
+        self._reclaim_cursor = "0-0"
 
     # --- EventBus interface ---------------------------------------------------
     def subscribe(self, event_type: str, handler: EventHandler) -> None:
@@ -122,6 +128,7 @@ class RedisEventBus:
                 await asyncio.sleep(1.0)
                 continue
             await self._check_lag()
+            await self._reclaim_stale()
             if not response:
                 continue
             for _stream, messages in response:
@@ -130,6 +137,60 @@ class RedisEventBus:
                     await client.xack(  # type: ignore[no-untyped-call]
                         self._stream, self._group, message_id
                     )
+
+    async def _reclaim_stale(self) -> None:
+        """Take over messages a previous consumer was delivered and never acked.
+
+        A consumer group's ``pending`` list is per-consumer, and the consumer name
+        is this process's stable instance id. So a container killed mid-dispatch —
+        a deploy, an OOM, a `docker compose up` that recreates it — leaves its
+        in-flight messages delivered to a name that will never ack them. Nothing
+        redelivers those on its own: ``XREADGROUP >`` only ever returns *new*
+        entries. They simply stop existing as far as the platform is concerned.
+
+        The live deployment carried 765 such messages, accumulated across
+        restarts, and they were invisible: the events had been published, the
+        stream still held them, and no handler had run. A gap in the middle of a
+        history that looks complete is worse than a gap you can see.
+
+        ``XAUTOCLAIM`` is exactly the right primitive: it hands us any message
+        idle longer than the threshold, we dispatch and ack it normally, and the
+        cursor walks the pending list across calls. Handlers are already required
+        to be idempotent — the bus has always been at-least-once — so a reclaim
+        that duplicates work is safe by contract.
+        """
+        try:
+            result = await self._provider.client().xautoclaim(
+                self._stream,
+                self._group,
+                self._consumer,
+                min_idle_time=self._reclaim_after_ms,
+                start_id=self._reclaim_cursor,
+                count=self._batch,
+            )
+        except Exception as exc:  # reclaiming is best-effort, never fatal
+            _logger.debug("redis_bus_reclaim_failed", error=str(exc))
+            return
+
+        # redis-py returns (next_cursor, claimed[, deleted]) depending on version.
+        if not isinstance(result, (list, tuple)) or len(result) < 2:
+            return
+        self._reclaim_cursor = str(result[0]) if result[0] else "0-0"
+        claimed = result[1] or []
+        if not claimed:
+            return
+
+        _logger.warning(
+            "redis_bus_reclaimed",
+            group=self._group,
+            count=len(claimed),
+            idle_ms=self._reclaim_after_ms,
+            note="messages a previous consumer never acked; replaying them now",
+        )
+        client = self._provider.client()
+        for message_id, fields in claimed:
+            await self._dispatch(fields)
+            await client.xack(self._stream, self._group, message_id)  # type: ignore[no-untyped-call]
 
     async def _check_lag(self) -> None:
         """Warn when this consumer group falls behind the stream.

@@ -30,7 +30,6 @@ from hades.contexts.exploration.application.factory import exploration_config_fr
 from hades.contexts.exploration.application.policy import (
     ExplorationPolicy,
     day_start,
-    week_start,
 )
 from hades.contexts.exploration.application.service import ExplorationService
 from hades.contexts.exploration.domain.events import (
@@ -387,9 +386,7 @@ async def test_spend_is_derived_from_the_ledger_not_from_a_counter() -> None:
     ledger = InMemoryExplorationLedger()
     now = datetime.now(UTC)
     for i in range(5):
-        await ledger.append(
-            ExplorationRecord(subject=f"m{i}", granted_at=now, notional_usd=1.0)
-        )
+        await ledger.append(ExplorationRecord(subject=f"m{i}", granted_at=now, notional_usd=1.0))
     verdict = await _service(ledger=ledger).consider(_candidate())
     # $5 of a $5 daily allowance: the dollar ceiling binds first (it is checked
     # before the trade count, and here both are reached at once).
@@ -410,10 +407,23 @@ async def test_yesterdays_spend_does_not_count_against_today() -> None:
         )
     verdict = await _service(ledger=ledger).consider(_candidate())
     assert verdict.granted
-    # ...but it still counts against the week and the lifetime totals, which is
-    # the whole reason the ceilings are independent.
-    spent_week, count = await ledger.spent_since(week_start(datetime.now(UTC)))
-    assert count == 5 and spent_week == 5.0
+
+    # Yesterday is outside today's window...
+    spent_today, today_count = await ledger.spent_since(day_start(datetime.now(UTC)))
+    assert today_count == 0 and spent_today == 0.0
+
+    # ...but it still counts against the lifetime total, which is the whole
+    # reason the ceilings are independent.
+    #
+    # This asserts the *lifetime* ceiling rather than the weekly one on purpose.
+    # The weekly window starts on the ISO Monday, so "yesterday" belongs to the
+    # previous week whenever the suite runs on a Monday — the original assertion
+    # passed six days out of seven and failed on the seventh, which is worse than
+    # not testing it, because the failure looks like a regression in the code
+    # rather than in the fixture. `week_start` itself is correct and is exercised
+    # by the weekly-ceiling tests, which anchor their timestamps to the window
+    # instead of to "now minus a day".
+    assert await ledger.spent_total() == (5.0, 5)
 
 
 async def test_the_budget_is_charged_on_approval_not_on_grant() -> None:
@@ -430,9 +440,7 @@ async def test_the_budget_is_charged_on_approval_not_on_grant() -> None:
 
 async def test_committing_a_decline_charges_nothing() -> None:
     ledger = InMemoryExplorationLedger()
-    service = _service(
-        evidence=_evidence(lessons=40, positive=20, negative=20), ledger=ledger
-    )
+    service = _service(evidence=_evidence(lessons=40, positive=20, negative=20), ledger=ledger)
     await service.commit(await service.consider(_candidate()))
     assert await ledger.spent_total() == (0.0, 0)
 
@@ -449,9 +457,7 @@ async def test_budget_exhaustion_is_announced_once_per_window() -> None:
     ledger = InMemoryExplorationLedger()
     now = datetime.now(UTC)
     for i in range(5):
-        await ledger.append(
-            ExplorationRecord(subject=f"m{i}", granted_at=now, notional_usd=1.0)
-        )
+        await ledger.append(ExplorationRecord(subject=f"m{i}", granted_at=now, notional_usd=1.0))
     service = _service(ledger=ledger, bus=bus)
     for _ in range(4):
         await service.consider(_candidate())
