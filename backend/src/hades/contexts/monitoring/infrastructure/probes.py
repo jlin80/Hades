@@ -205,3 +205,81 @@ class SystemResourceProbe:
             "memory_pct": psutil.virtual_memory().percent,
             "disk_pct": psutil.disk_usage(self._disk_path).percent,
         }
+
+
+class EventBusConsumerProbe:
+    """Checks that every consumer group is actually still reading the stream.
+
+    This probe exists because of the most expensive silent failure the platform
+    has had. The Worker's consumer loop died thirty minutes after start-up and
+    the platform ran for **four more days** without consuming a single event.
+    Every existing probe passed the whole time, and truthfully: Postgres
+    answered, Redis pinged, the API served ``/health``, the liveness files were
+    fresh — the Worker process really was alive. It just was not listening.
+
+    The gap was that nothing measured the one thing that mattered. Liveness is
+    written by a service's *main* coroutine, so it says the process exists, not
+    that its consumer turns. And a probe living inside the Watchdog cannot read
+    another process's bus object anyway.
+
+    Redis already holds the answer, across processes and independent of any
+    service's own opinion of itself: a consumer group's ``idle`` is how long
+    since that consumer last talked to the stream. A live loop blocks for at
+    most ``block_ms`` per read, so idle stays seconds. Four days of idle is not
+    a slow consumer — it is an absent one. Reading it here means "the bus is
+    being consumed" is finally an assertion rather than an assumption.
+    """
+
+    def __init__(
+        self,
+        provider: RedisProvider,
+        *,
+        stream_prefix: str = "hades.events",
+        max_idle_seconds: float = 300.0,
+    ) -> None:
+        self._provider = provider
+        self._stream = f"{stream_prefix}:stream"
+        self._max_idle_ms = max_idle_seconds * 1000.0
+
+    @property
+    def name(self) -> str:
+        return "event_bus_consumers"
+
+    async def check(self) -> ComponentHealth:
+        try:
+            client = self._provider.client()
+            groups = await client.xinfo_groups(self._stream)  # type: ignore[no-untyped-call]
+        except Exception as exc:
+            # No stream yet is a fresh deployment, not a fault.
+            if "no such key" in str(exc).lower():
+                return ComponentHealth(
+                    name=self.name, status=HealthStatus.HEALTHY, detail="stream not created yet"
+                )
+            return ComponentHealth(name=self.name, status=HealthStatus.UNHEALTHY, detail=str(exc))
+
+        stalled: list[str] = []
+        for group in groups:
+            group_name = str(group.get("name", "?"))
+            try:
+                consumers = await client.xinfo_consumers(  # type: ignore[no-untyped-call]
+                    self._stream, group_name
+                )
+            except Exception:  # a group can vanish between the two calls
+                continue
+            if not consumers:
+                stalled.append(f"{group_name}=no-consumer")
+                continue
+            # A group is reading if *any* of its consumers is; the freshest wins.
+            idle_ms = min(float(c.get("idle", 0)) for c in consumers)
+            if idle_ms > self._max_idle_ms:
+                stalled.append(f"{group_name}={idle_ms / 1000:.0f}s")
+
+        if stalled:
+            return ComponentHealth(
+                name=self.name,
+                status=HealthStatus.UNHEALTHY,
+                detail=f"consumer groups not reading: {', '.join(sorted(stalled))}",
+            )
+        return ComponentHealth(
+            name=self.name, status=HealthStatus.HEALTHY, detail=f"{len(groups)} groups reading"
+        )

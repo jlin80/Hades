@@ -523,6 +523,12 @@ class WatchdogSettings(_Section):
     # Liveness files written by background services; the healthcheck reads them.
     liveness_dir: str = "/var/run/hades"
     liveness_max_age_seconds: int = 60
+    #: How long a consumer group may go without touching the event stream before
+    #: the Watchdog calls it unhealthy. A live consumer blocks for at most a
+    #: couple of seconds per read, so anything past a few minutes means the loop
+    #: is gone — the Worker's once sat idle for four days while every other probe
+    #: stayed green.
+    event_bus_max_idle_seconds: float = 300.0
 
     @property
     def watched_role_list(self) -> list[str]:

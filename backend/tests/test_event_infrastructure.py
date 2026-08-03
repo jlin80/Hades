@@ -270,3 +270,127 @@ async def test_a_failing_reclaim_never_breaks_the_bus() -> None:
 
     bus = _redis_bus(_Broken())
     await bus._reclaim_stale()  # must not raise
+
+
+# --- the consumer loop that died in silence -----------------------------------
+#
+# The Worker's loop logged "redis_bus_consuming" once, ran for thirty minutes and
+# stopped. No error, no traceback, no restart — and the platform ran four more
+# days believing it was consuming, because only the xreadgroup call was guarded
+# and the task that ended was held in a list, so asyncio never reported it.
+
+
+class _ExplodingClient(_FakeRedisClient):
+    """Fails the read the first N times, then stops the bus on the next one.
+
+    Stopping from inside the fake keeps the test deterministic: the loop ends
+    because the scenario is complete, not because a poller happened to observe
+    it in time. An earlier version raced a spin-loop against a counter and hung.
+    """
+
+    def __init__(self, failures: int, stop_after: int = 6) -> None:
+        super().__init__()
+        self.reads = 0
+        self._failures = failures
+        self._stop_after = stop_after
+        self.bus: object | None = None
+
+    async def xreadgroup(self, *a: object, **k: object):  # type: ignore[no-untyped-def]
+        self.reads += 1
+        if self.reads <= self._failures:
+            raise RuntimeError("connection reset")
+        if self.bus is not None and self.reads >= self._stop_after:
+            self.bus.stop()  # type: ignore[attr-defined]
+        return []
+
+    async def xgroup_create(self, *a: object, **k: object) -> None:
+        return None
+
+    async def xautoclaim(self, *a: object, **k: object):  # type: ignore[no-untyped-def]
+        return ["0-0", [], []]
+
+
+async def test_the_consume_loop_survives_anything_the_cycle_raises(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """The regression: one raise used to end the loop for the process's lifetime."""
+    import asyncio
+
+    real_sleep = asyncio.sleep
+    errors = _spy_errors(monkeypatch)
+    client = _ExplodingClient(failures=3, stop_after=6)
+    bus = _redis_bus(client, lag_check_interval_seconds=0.0)
+    client.bus = bus
+    # Collapse the loop's error backoff; the point is that it retries, not how
+    # long it waits. Bound to the real sleep so the patch cannot recurse.
+    monkeypatch.setattr(
+        "hades.shared_kernel.events.redis_bus.asyncio.sleep",
+        lambda _delay: real_sleep(0),
+    )
+
+    await asyncio.wait_for(bus.run(), timeout=10)
+
+    assert client.reads >= 6, "the loop stopped at the first failure — the original bug"
+    assert "redis_bus_cycle_failed" in errors, "a dying cycle must leave a trace"
+
+
+async def test_a_completed_cycle_is_recorded_so_a_dead_loop_is_visible() -> None:
+    client = _ExplodingClient(failures=0)
+    bus = _redis_bus(client, lag_check_interval_seconds=0.0)
+
+    assert bus.last_cycle_at is None
+    await bus._consume_once()
+    assert bus.last_cycle_at is not None, (
+        "nothing recorded that the loop turned, so nothing can tell it stopped"
+    )
+
+
+async def test_an_unparseable_envelope_is_reported_not_raised(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """A poison message must cost one error line, never the whole consumer."""
+    errors = _spy_errors(monkeypatch)
+    bus = _redis_bus(_FakeRedisClient())
+
+    from hades.shared_kernel.events import redis_bus as module
+
+    def boom(_envelope: object) -> object:
+        raise ValueError("schema changed under us")
+
+    monkeypatch.setattr(bus._registry, "rebuild", boom)
+
+    async def handler(event: object) -> None:  # pragma: no cover - must not run
+        raise AssertionError("a message that cannot be rebuilt must not be dispatched")
+
+    bus.subscribe("NotificationRequested", handler)
+    await bus._dispatch(_envelope_fields("poison"))  # must not raise
+
+    assert "redis_bus_rebuild_failed" in errors
+    assert module is not None
+
+
+async def test_a_reclaimed_message_that_was_trimmed_is_dropped_not_dispatched(
+    monkeypatch,  # type: ignore[no-untyped-def]
+) -> None:
+    """The live recurrence: MAXLEN trims an entry that is still pending.
+
+    §6q capped the stream. Anything still unacked when the cap moved past it is
+    left in the pending list pointing at a message that no longer exists, and
+    `XAUTOCLAIM` hands those back with empty fields. Dispatching one raised on
+    `fields.get(...)` and killed the consumer loop — so the reclaim meant to heal
+    orphans became a new way for the Worker to stop consuming minutes after every
+    restart. Measured live: pending ids older than the stream's own first entry.
+    """
+    errors = _spy_errors(monkeypatch)
+    client = _ClaimingClient([("1-1", {}), ("1-2", _envelope_fields("real"))])
+    bus = _redis_bus(client, reclaim_after_seconds=60.0)
+
+    seen: list[str] = []
+
+    async def handler(event) -> None:  # type: ignore[no-untyped-def]
+        seen.append(event.title)
+
+    bus.subscribe("NotificationRequested", handler)
+    await bus._reclaim_stale()  # must not raise
+
+    assert seen == ["real"], "the trimmed entry must be skipped, the real one handled"
+    assert client.acked == ["1-1", "1-2"], (
+        "a vanished entry must still be acked or it is reclaimed forever"
+    )
+    assert errors == [], "a trimmed entry is expected housekeeping, not an error"

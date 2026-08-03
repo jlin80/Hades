@@ -15,6 +15,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import signal
+from collections.abc import Coroutine
+from typing import Any
 
 from hades.bootstrap import Container, build_container
 from hades.ops.liveness import Liveness
@@ -62,13 +64,52 @@ class ServiceProcess:
         # If we're on the Redis transport, run the consumer loop for this service.
         bus = self._container.event_bus
         if isinstance(bus, RedisEventBus):
-            self._tasks.append(asyncio.create_task(bus.run()))
+            self._spawn(bus.run(), name="event_bus_consumer")
 
         await self.setup()
-        self._tasks.append(asyncio.create_task(self._liveness_loop()))
+        self._spawn(self._liveness_loop(), name="liveness")
 
         await self._stop.wait()
         await self._shutdown()
+
+    def _spawn(self, coro: Coroutine[Any, Any, None], *, name: str) -> asyncio.Task[None]:
+        """Start a background task that cannot die quietly.
+
+        ``asyncio`` only reports an unretrieved task exception from the task's
+        ``__del__``, so a task kept alive in ``self._tasks`` — as every task here
+        is — can raise and leave no trace anywhere. That is not hypothetical: the
+        Worker's event-bus consumer stopped after thirty minutes and the platform
+        ran four more days believing it was consuming, because the exception that
+        ended it was never retrieved and never collected.
+
+        Every background task now carries a completion callback. A task that ends
+        while the service is still running is a defect by definition — these
+        loops are meant to run until :meth:`stop` — so it is logged as an error
+        with its traceback, named, and never silent again.
+        """
+        task = asyncio.create_task(coro, name=f"{self.role}:{name}")
+        task.add_done_callback(lambda t: self._on_task_done(name, t))
+        self._tasks.append(task)
+        return task
+
+    def _on_task_done(self, name: str, task: asyncio.Task[None]) -> None:
+        if task.cancelled() or self._stop.is_set():
+            return  # ordinary shutdown
+        exc = task.exception()
+        if exc is None:
+            self._log.error(
+                "background_task_exited",
+                task=name,
+                note="a task that should run until shutdown returned on its own",
+            )
+            return
+        self._log.error(
+            "background_task_crashed",
+            task=name,
+            error=str(exc),
+            error_type=type(exc).__name__,
+            exc_info=exc,
+        )
 
     async def _start_log_shipping(self) -> None:
         """Ship this process's log lines so the dashboard terminal can show them.

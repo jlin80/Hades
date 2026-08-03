@@ -2257,6 +2257,94 @@ the snapshot, publish the event, and the PnL applies.
 
 ---
 
+## 6r. The consumer that was not behind — it was gone (2026-08-03)
+
+§6q bounded the stream and taught the consumer to report its own lag. Four days later the
+platform had stopped trading entirely, and the reason was that §6q had measured the wrong
+failure. The Worker was not behind. It had stopped reading altogether, and a loop that is not
+running reports no lag at all.
+
+Measured live, with the stream being written to at that same moment:
+
+```
+group          pending   last-delivered      consumer idle
+worker             823   1785420780748-0     349,704,437 ms  ← 97 hours
+watchdog           118   1785419313328-0      ~97 hours
+engine              21   1785576872235-0      ~55 hours
+notification         4   1785491855026-0      ~78 hours
+scheduler           10   1785491855026-0      ~78 hours
+```
+
+`GET /api/v1/funnel?hours=24` returned **zero at every one of its nine stages**, and its
+diagnosis blamed the Scanner — while the Scanner was in fact publishing normally, its
+`PoolDiscovered` events landing in a stream whose `last-generated-id` was the current
+millisecond. Nine containers healthy, four days, not one trade.
+
+**The mechanism, and why nothing said anything.** `RedisEventBus.run()` guarded only the
+`xreadgroup` call. Anything raised further down the cycle — rebuilding an envelope into a
+typed event, an `XACK` on a dropped connection — escaped the `while` and returned from
+`run()`. And the task could not report itself either: `ServiceProcess` holds every task in
+`self._tasks`, and asyncio's "Task exception was never retrieved" warning is emitted from the
+task's `__del__`, so a task that is still referenced is never collected and the warning never
+fires. The single log line `redis_bus_consuming` at 15:03:13 on 2026-07-30 was the last thing
+the bus ever said.
+
+Every existing probe passed the whole time, and passed *truthfully*: Postgres answered, Redis
+pinged, the API served `/health`, the liveness files were fresh. The Worker process really was
+alive. Liveness is touched by a service's **main** coroutine — it has never had anything to
+say about whether that service's consumer turns.
+
+**Three changes, each closing one step of that chain:**
+
+1. **Nothing inside the loop may end it.** The read/dispatch/ack cycle moved into
+   `_consume_once()`, and `run()` wraps the whole call — not one line of it — in a guard that
+   logs `redis_bus_cycle_failed` with a traceback and keeps turning. `CancelledError` is
+   re-raised, so shutdown is still the only way out. A message that cannot be rebuilt is now
+   caught in `_dispatch` too, so a poison envelope costs one error line instead of wedging the
+   group behind it.
+2. **No background task dies quietly.** `ServiceProcess._spawn()` replaces the bare
+   `create_task` everywhere and attaches a completion callback. These loops are meant to run
+   until shutdown, so a task that ends before then is a defect by definition: it is logged as
+   `background_task_crashed` with its traceback, or `background_task_exited` if it merely
+   returned.
+3. **A dead consumer can no longer look healthy.** `EventBusConsumerProbe` reads each group's
+   consumer `idle` from Redis and fails the Watchdog above `WATCHDOG_EVENT_BUS_MAX_IDLE_SECONDS`
+   (default 300). Redis is the right place to ask: the answer is the same across processes and
+   does not depend on a service's own opinion of itself. One group stalled condemns the probe —
+   a healthy Engine does not cover for an absent Worker, because the Worker is where the whole
+   decision path lives.
+
+**The trigger, caught in the act.** Mid-session the platform was redeployed and the consumers
+came back — `engine`, `notification` and `scheduler` reached `lag 0`. The Worker consumed for
+about six minutes and **died again**, silently, exactly as before. Its consumer `idle` climbed
+in step with the wall clock while its `pending` stayed frozen at 621, and its last log line was
+once more `redis_bus_consuming`, with a single guarded `redis_bus_read_failed` warning before
+the silence.
+
+Six minutes is `EVENT_BUS_RECLAIM_AFTER_SECONDS`. The first reclaim cycle was the thing that
+killed it, and the reason is the interaction between the two fixes in §6q:
+
+* the stream is now capped by `MAXLEN`, so entries are trimmed away on a schedule of their own;
+* a message left unacked when the cap moves past it stays in the **pending list** pointing at a
+  message that no longer exists. Measured live: the Worker's pending ids started at
+  `1785119381359-0`, older than the stream's own `recorded-first-entry-id`;
+* `XAUTOCLAIM` hands those back with **empty fields**, and `_dispatch` began with
+  `fields.get("type", "")`.
+
+So the orphan reclaim added to heal §6q's 765 stranded messages became a *new* way to stop the
+Worker consuming, minutes after every restart — a fix whose failure mode was the same silence
+it was written to end. `_reclaim_stale` now skips a claimed entry with no fields and acks it, so
+it leaves the pending list instead of being reclaimed forever, and the outer guard means even an
+unforeseen version of this cannot end the loop again.
+
+> §6q's lesson was that being hours behind looked exactly like being healthy. This one is
+> sharper: *not running at all* looked exactly like being healthy, and it did so because the
+> only thing measuring the consumer was the consumer. That is also why the follow-up fix could
+> reintroduce the outage without anyone noticing — there was no independent witness, so each
+> repair was graded by the component it repaired.
+
+---
+
 ## 7. Testing
 
 `backend/tests` (379 tests, all green; `mypy --strict` clean; `ruff` clean; suite runs

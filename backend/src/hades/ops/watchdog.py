@@ -21,6 +21,7 @@ from hades.contexts.monitoring.application.watchdog import Watchdog
 from hades.contexts.monitoring.domain.ports import HealthProbe
 from hades.contexts.monitoring.infrastructure.probes import (
     ClickHouseProbe,
+    EventBusConsumerProbe,
     HttpProbe,
     PostgresProbe,
     RedisProbe,
@@ -75,6 +76,11 @@ class WatchdogProcess(ServiceProcess):
                 http=self._container.http,
             ),
             ClickHouseProbe(self._container.clickhouse),
+            EventBusConsumerProbe(
+                self._container.redis,
+                stream_prefix=settings.event_bus.stream_prefix,
+                max_idle_seconds=wd.event_bus_max_idle_seconds,
+            ),
             resource_probe,
         ]
 

@@ -25,6 +25,7 @@ from hades.contexts.monitoring.domain.models import HealthStatus
 from hades.contexts.monitoring.domain.ports import HealthProbe
 from hades.contexts.monitoring.infrastructure.probes import (
     ClickHouseProbe,
+    EventBusConsumerProbe,
     HttpProbe,
     PostgresProbe,
     RedisProbe,
@@ -101,6 +102,18 @@ def build_probes(container: Container) -> list[HealthProbe]:
         )
     )
     probes.append(ClickHouseProbe(container.clickhouse))
+    # Assembled here rather than only in the Watchdog because this list is what
+    # `/health` reports *and* what the Production Checklist gates the switch to
+    # LIVE on. A bus with no live consumer is precisely the state that must not
+    # be allowed to reach live trading: it looks operational from every other
+    # angle, and the Worker's loop stayed dead for four days proving it.
+    probes.append(
+        EventBusConsumerProbe(
+            container.redis,
+            stream_prefix=s.event_bus.stream_prefix,
+            max_idle_seconds=s.watchdog.event_bus_max_idle_seconds,
+        )
+    )
     return probes
 
 
