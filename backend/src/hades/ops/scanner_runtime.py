@@ -87,6 +87,10 @@ class ScannerRuntime:
         self._metrics.features_computed.inc(n)
         self._features_total += n
 
+    def _observe_features_latency(self, seconds: float) -> None:
+        """End-to-end discovered → features-ready, the figure §2.3 compares on."""
+        self._metrics.discovered_to_features_seconds.observe(seconds)
+
     # -- construction ---------------------------------------------------------
 
     def _build_rpc(self) -> RpcManager:
@@ -170,7 +174,9 @@ class ScannerRuntime:
             schema_version=s.feature.schema_version,
             on_computed=self._count_features,
         )
-        FeatureComputationHandler(engine, HintInputsAssembler()).register(self._c.event_bus)
+        FeatureComputationHandler(
+            engine, HintInputsAssembler(), on_latency=self._observe_features_latency
+        ).register(self._c.event_bus)
         if s.pipeline.snapshot_enabled:
             HistoryBuilder(
                 self._snapshot_store(), schema_version=s.feature.schema_version

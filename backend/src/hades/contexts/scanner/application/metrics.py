@@ -63,6 +63,23 @@ class ScannerMetrics:
             "Wall-clock time per pipeline stage",
             ("stage",),
         )
+        # The two clocks the acquisition path was missing. `analysis_seconds`
+        # starts when a candidate *leaves the queue* and stops at
+        # TokenDiscovered, so on its own it measures the fastest part of the
+        # journey and would show a gain from work that changed nothing.
+        self.discovery_lag_seconds = metrics.histogram(
+            "hades_scanner_discovery_lag_seconds",
+            "Age of a token when we first saw it (created_at → discovered)",
+            ("source",),
+            # A 5s poll interval puts the floor near 2.5s on average; the upper
+            # buckets exist because a source can surface a token minutes late.
+            buckets=(1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 300.0, 900.0),
+        )
+        self.discovered_to_features_seconds = metrics.histogram(
+            "hades_scanner_discovered_to_features_seconds",
+            "End-to-end time from TokenDiscovered to features ready",
+            buckets=(0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0),
+        )
         self.queue_depth = metrics.gauge(
             "hades_scanner_queue_depth",
             "Current depth of the acquisition processing queue",

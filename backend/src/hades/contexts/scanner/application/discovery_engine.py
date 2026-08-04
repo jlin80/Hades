@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 
 from hades.contexts.scanner.application.metrics import ScannerMetrics
 from hades.contexts.scanner.domain.events import SourceHealthChanged
@@ -164,7 +165,28 @@ class DiscoveryEngine:
             return
         await self._registry.mark_seen(candidate.token)
         self._metrics.discovered.labels(source=source_name).inc()
+        self._observe_discovery_lag(candidate, source_name)
         await self._sink(candidate)
+
+    def _observe_discovery_lag(self, candidate: RawTokenCandidate, source_name: str) -> None:
+        """Record how old the token already was when we first saw it.
+
+        This is the part of the latency budget that no downstream optimisation
+        can recover: the source's own delay plus our poll interval. Sources that
+        do not report ``created_at`` are skipped rather than recorded as zero —
+        a missing measurement must not look like an instant one.
+        """
+        created_at = candidate.created_at
+        if created_at is None:
+            return
+        reference = created_at if created_at.tzinfo is not None else created_at.replace(tzinfo=UTC)
+        lag = (datetime.now(UTC) - reference).total_seconds()
+        if lag < 0:
+            # A source clock ahead of ours. Discarded rather than clamped to 0,
+            # which would quietly pull the observed median down.
+            _logger.debug("discovery_lag_negative", source=source_name, lag_seconds=lag)
+            return
+        self._metrics.discovery_lag_seconds.labels(source=source_name).observe(lag)
 
     def _reject_reason(self, candidate: RawTokenCandidate) -> str | None:
         s = self._settings
