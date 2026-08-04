@@ -2345,6 +2345,59 @@ unforeseen version of this cannot end the loop again.
 
 ---
 
+## 6s. Three surfaces that reported nothing wrong (2026-08-03)
+
+Follow-ups from the same audit as §6r, each an instance of a pattern the log keeps producing:
+a component that is *silent* being mistaken for a component that is *fine*.
+
+### The funnel blamed the producer
+
+`GET /api/v1/funnel?hours=24` returned zero at all nine stages and said *"Nothing was
+discovered in this window — the Scanner's sources are the place to look."* The Scanner was
+publishing normally. Every counter the funnel reads is written by a handler on the far side of
+the event bus, so a stopped consumer empties the funnel **from the top** and is indistinguishable
+from a Scanner that found nothing — and the platform spent four days being told to check its
+sources.
+
+The diagnosis now rules out the bus before naming a producer: when `discovered == 0` it asks
+Redis which consumer groups have stopped reading, and says so. It only asks in that one case,
+so the endpoint stays cheap enough to poll, and the check is advisory — a diagnosis that cannot
+be computed must never break the endpoint carrying it. `_diagnose` stays a pure function over
+counters, with the group list passed in, so it remains directly testable.
+
+### The Health screen was the one screen that never refreshed
+
+`HealthScreen.tsx` fetched once on mount and swallowed the failure —
+`api.health().then(setHealth).catch(() => undefined)` with an empty dependency array. A failed
+call left the panel on "Loading…" for the rest of the session; a successful one left the
+operator reading a snapshot from page load no matter what happened afterwards. Every other
+screen already polled; this was the outlier, and it was the screen whose entire job is to say
+that something is wrong. It now polls on the shared 10s cadence, tracks reachability
+separately from data, timestamps what it is showing, and says plainly that an unreachable API
+is itself a fault.
+
+### `dedup_key` was a field nobody read
+
+`NotificationRequested` has carried a `dedup_key` since it was defined, and nothing anywhere
+consumed it — the same shape as `WATCHDOG_UNHEALTHY_AFTER_MISSED_BEATS` before §6k and the
+`SCORING_*` thresholds before `6008192`: a name that promises a behaviour the code never had.
+Meanwhile §6k fixed the *recovery* storm by debouncing one specific message, leaving every other
+alert able to repeat every few seconds for as long as its underlying situation persisted.
+
+The Notification Service — the single point every alert already passes through — now suppresses
+an alert repeated inside `NOTIFY_DEDUP_WINDOW_SECONDS` (default 300). Keyed by channel +
+severity + `dedup_key` (falling back to the title), so an alert that **escalates** is always
+delivered: same text at a worse severity is new information. **CRITICAL is never suppressed** —
+the cost of one repeated critical is noise, the cost of swallowing one is the thing this
+platform exists to avoid. The key map is bounded, because a caller interpolating an id into a
+title would otherwise grow it forever.
+
+> An operator who learns their alert channel is noise stops reading it, and then the alert that
+> matters arrives in a channel nobody trusts. Deduplication is not tidiness; it is what keeps the
+> channel load-bearing.
+
+---
+
 ## 7. Testing
 
 `backend/tests` (379 tests, all green; `mypy --strict` clean; `ruff` clean; suite runs

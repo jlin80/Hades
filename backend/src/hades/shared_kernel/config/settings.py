@@ -501,6 +501,11 @@ class NotificationSettings(_Section):
     retry_attempts: int = 3
     rate_limit_per_minute: int = 30
     timeout_seconds: int = 10
+    #: How long an identical alert is suppressed after being delivered. The same
+    #: situation re-detected on every probe tick is one situation, not news
+    #: repeated every few seconds — and an operator who learns the channel is
+    #: noise stops reading the alert that matters. Set to 0 to disable.
+    dedup_window_seconds: float = 300.0
 
 
 class WatchdogSettings(_Section):

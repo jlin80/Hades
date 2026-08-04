@@ -48,6 +48,7 @@ class NotificationProcess(ServiceProcess):
             notifiers,
             min_severity=Severity(cfg.min_severity),
             recorder=recorder,
+            dedup_window_seconds=cfg.dedup_window_seconds,
         )
         service.register(self._container.event_bus)
         self._log.info("notification_ready", channels=[n.channel for n in notifiers])
