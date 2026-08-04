@@ -27,6 +27,7 @@ from sqlalchemy import desc, func, select
 
 from hades.api.dependencies import get_container
 from hades.bootstrap import Container
+from hades.shared_kernel.config.settings import EventBusTransport
 from hades.shared_kernel.persistence.models.learning import CommitteePredictionRecord
 from hades.shared_kernel.persistence.models.market import Feature
 from hades.shared_kernel.persistence.models.risk import RiskDecisionRecord
@@ -141,7 +142,16 @@ async def funnel(
         "stages": stages,
         "reject_reasons": reject_reasons,
         "open_positions_now": int(open_now or 0),
-        "diagnosis": _diagnose(stages, reject_reasons, int(open_now or 0)),
+        "diagnosis": _diagnose(
+            stages,
+            reject_reasons,
+            int(open_now or 0),
+            # Only asked when the funnel is empty from the top, which is the one
+            # case where a stopped consumer and a silent Scanner look identical.
+            stalled_groups=(
+                await _stalled_consumer_groups(container) if int(discovered or 0) == 0 else []
+            ),
+        ),
     }
 
 
@@ -149,7 +159,47 @@ def _stage(key: str, label: str, count: Any) -> dict[str, Any]:
     return {"key": key, "label": label, "count": int(count or 0)}
 
 
-def _diagnose(stages: list[dict[str, Any]], reject_reasons: dict[str, int], open_now: int) -> str:
+async def _stalled_consumer_groups(container: Container) -> list[str]:
+    """Consumer groups that have stopped reading the event bus, if any.
+
+    Asked before blaming a producer, because the funnel once reported zero at all
+    nine stages and pointed at the Scanner while the Scanner was publishing
+    normally — its events were landing in a stream nobody was consuming. Every
+    counter here is fed by a handler on the far side of that bus, so a dead
+    consumer zeroes the whole funnel and looks exactly like a dead Scanner.
+
+    Best-effort: a diagnosis that cannot be computed must never break the
+    endpoint that carries it.
+    """
+    settings = container.settings
+    if settings.event_bus.transport != EventBusTransport.REDIS:
+        return []
+    stream = f"{settings.event_bus.stream_prefix}:stream"
+    max_idle_ms = settings.watchdog.event_bus_max_idle_seconds * 1000.0
+    try:
+        client = container.redis.client()
+        groups = await client.xinfo_groups(stream)  # type: ignore[no-untyped-call]
+        stalled: list[str] = []
+        for group in groups:
+            name = str(group.get("name", "?"))
+            consumers = await client.xinfo_consumers(stream, name)  # type: ignore[no-untyped-call]
+            if not consumers:
+                stalled.append(name)
+                continue
+            if min(float(c.get("idle", 0)) for c in consumers) > max_idle_ms:
+                stalled.append(name)
+        return sorted(stalled)
+    except Exception:  # diagnosis is advisory, never load-bearing
+        return []
+
+
+def _diagnose(
+    stages: list[dict[str, Any]],
+    reject_reasons: dict[str, int],
+    open_now: int,
+    *,
+    stalled_groups: list[str] | None = None,
+) -> str:
     """Name the first stage that lost everything — the actionable sentence.
 
     The funnel's numbers already contain the answer, but reading a cliff off nine
@@ -157,6 +207,18 @@ def _diagnose(stages: list[dict[str, Any]], reject_reasons: dict[str, int], open
     """
     counts = {s["key"]: s["count"] for s in stages}
     if counts["discovered"] == 0:
+        # Rule out the bus before naming the Scanner. Every stage below is
+        # written by a handler downstream of the event bus, so a stopped
+        # consumer empties the funnel from the top and is indistinguishable
+        # from a Scanner that found nothing — the platform spent four days
+        # in exactly that state being told to check its sources.
+        stalled = stalled_groups or []
+        if stalled:
+            return (
+                "Nothing reached any stage, and the event bus is not being consumed "
+                f"({', '.join(stalled)} stalled). The Scanner may well be publishing "
+                "normally — fix the consumer before looking at the sources."
+            )
         return (
             "Nothing was discovered in this window — the Scanner's sources are the place to look."
         )

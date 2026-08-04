@@ -95,3 +95,37 @@ def test_a_trading_pipeline_is_reported_as_healthy() -> None:
 
 def test_an_idle_scanner_points_at_the_sources_not_at_trading() -> None:
     assert "Scanner's sources" in _diagnose(_stages(), {}, 0)
+
+
+def test_an_empty_funnel_names_the_bus_before_the_scanner() -> None:
+    """The regression this endpoint itself caused.
+
+    The funnel reported zero at all nine stages and told the operator to look at
+    the Scanner's sources. The Scanner was publishing normally — its events were
+    landing in a stream nobody consumed, and the platform stayed in that state
+    for four days. Every counter here is written by a handler on the far side of
+    the bus, so a stopped consumer empties the funnel from the top and is
+    indistinguishable from a Scanner that found nothing.
+    """
+    diagnosis = _diagnose(_stages(), {}, 0, stalled_groups=["watchdog", "worker"])
+
+    assert "not being consumed" in diagnosis
+    assert "worker" in diagnosis
+    assert "Scanner's sources" not in diagnosis, (
+        "naming the Scanner here sends the operator to the wrong component"
+    )
+
+
+def test_an_empty_funnel_still_names_the_scanner_when_the_bus_is_fine() -> None:
+    """The bus check must narrow the diagnosis, never replace it."""
+    assert "Scanner's sources" in _diagnose(_stages(), {}, 0, stalled_groups=[])
+
+
+def test_the_bus_check_does_not_override_a_real_cliff() -> None:
+    """A stalled group is only the answer when nothing was discovered at all."""
+    stages = _stages(discovered=100, features=100, security_assessed=100)
+
+    diagnosis = _diagnose(stages, {}, 0, stalled_groups=["worker"])
+
+    assert "not being consumed" not in diagnosis
+    assert "Passed Security" in diagnosis
