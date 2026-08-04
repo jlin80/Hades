@@ -21,6 +21,7 @@ from hades.contexts.monitoring.application.watchdog import Watchdog
 from hades.contexts.monitoring.domain.ports import HealthProbe
 from hades.contexts.monitoring.infrastructure.probes import (
     ClickHouseProbe,
+    EventBusConsumerProbe,
     HttpProbe,
     PostgresProbe,
     RedisProbe,
@@ -60,12 +61,26 @@ class WatchdogProcess(ServiceProcess):
                 settings.solana.rpc_http_url,
                 timeout_seconds=settings.timeouts.rpc_seconds,
                 latency_max_ms=wd.rpc_latency_max_ms,
+                http=self._container.http,
             ),
-            HttpProbe("api", wd.api_health_url, timeout_seconds=settings.timeouts.http_seconds),
             HttpProbe(
-                "dashboard", wd.dashboard_url, timeout_seconds=settings.timeouts.http_seconds
+                "api",
+                wd.api_health_url,
+                timeout_seconds=settings.timeouts.http_seconds,
+                http=self._container.http,
+            ),
+            HttpProbe(
+                "dashboard",
+                wd.dashboard_url,
+                timeout_seconds=settings.timeouts.http_seconds,
+                http=self._container.http,
             ),
             ClickHouseProbe(self._container.clickhouse),
+            EventBusConsumerProbe(
+                self._container.redis,
+                stream_prefix=settings.event_bus.stream_prefix,
+                max_idle_seconds=wd.event_bus_max_idle_seconds,
+            ),
             resource_probe,
         ]
 
@@ -109,6 +124,9 @@ class WatchdogProcess(ServiceProcess):
             notifier=self._container.notification,
             repository=repository,
             recovery=recovery,
+            # WATCHDOG_UNHEALTHY_AFTER_MISSED_BEATS existed as a setting that
+            # nothing consulted; recovery fired on the first bad probe.
+            unhealthy_after=wd.unhealthy_after_missed_beats,
         )
         self._tasks.append(asyncio.create_task(watchdog.run(self._stop)))
         self._log.info("watchdog_process_ready", probes=[p.name for p in probes])

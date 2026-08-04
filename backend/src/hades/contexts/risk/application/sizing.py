@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from hades.contexts.common.domain.value_objects import Percentage
 from hades.contexts.risk.domain.models import (
+    ExplorationGrant,
     PositionSizing,
     RiskCandidate,
     SizingConfig,
@@ -102,6 +103,61 @@ class PositionSizingEngine:
             risk_amount_usd=realised_risk,
             factors=factors,
             detail=f"sized to ${notional:.4f} at conviction {conviction:.2f}",
+        )
+
+    def explore(self, grant: ExplorationGrant, *, available_usd: float) -> SizingDecision:
+        """Size an *exploration* trade: fixed amount, tight stop, no conviction.
+
+        A separate method rather than a branch inside :meth:`size`, because the
+        two are different ideas that happen to produce the same shape. Normal
+        sizing asks "how much does this opportunity deserve?"; exploration
+        answers "how much does one sample cost?", and the answer was fixed in
+        configuration before the candidate existed. Blending conviction in here
+        would reintroduce, at the sizing step, the very belief the programme
+        exists to test — and would do it invisibly, since the result is still
+        just a number of dollars.
+
+        The cash check remains. An exploration trade may be tiny and it may waive
+        a conviction gate, but it may not spend money the book does not have:
+        ``available_usd`` is already net of the mandatory liquidity reserve, so
+        respecting it here means the reserve cannot be breached to buy evidence.
+        """
+        notional = round(min(grant.notional_usd, max(0.0, available_usd)), 6)
+        stop_fraction = max(0.01, grant.stop_loss_pct / 100.0)
+        factors = {
+            "exploration": 1.0,
+            "conviction": 0.0,
+            "requested_usd": round(grant.notional_usd, 6),
+            "available_usd": round(max(0.0, available_usd), 6),
+        }
+        if notional < grant.notional_usd or notional <= 0.0:
+            return SizingDecision(
+                approved=False,
+                conviction=0.0,
+                factors=factors,
+                detail=(
+                    f"exploration needs ${grant.notional_usd:.4f}, "
+                    f"${max(0.0, available_usd):.4f} deployable after reserve"
+                ),
+            )
+        return SizingDecision(
+            approved=True,
+            sizing=PositionSizing(
+                notional=to_money(notional),
+                take_profit=Percentage(value=grant.take_profit_pct),
+                stop_loss=Percentage(value=grant.stop_loss_pct),
+                # No trailing stop on an exploration trade. A trailing exit makes
+                # the realised return depend on the path *and* on the exit rule,
+                # which muddies the one thing the trade was bought for: a clean
+                # label for what this kind of candidate does.
+                trailing_enabled=False,
+                trailing_activation=Percentage(value=0.0),
+                trailing_distance=Percentage(value=0.0),
+            ),
+            conviction=0.0,
+            risk_amount_usd=round(notional * stop_fraction, 6),
+            factors=factors,
+            detail=f"exploration sample sized to a fixed ${notional:.4f}",
         )
 
     # -- internals ------------------------------------------------------------

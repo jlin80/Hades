@@ -57,11 +57,25 @@ x-app-base: &app-base
       max-size: "10m"
       max-file: "5"
 
+# Health-check budget for the Python services.
+#
+# Each probe runs `python -m hades.ops.healthcheck`, which starts an interpreter
+# and imports the application package — pydantic, sqlalchemy, fastapi and several
+# hundred modules. That is inherently slow, and on a small host it is *much*
+# slower than it looks: on a 2-vCPU LXC a bare `python -c "print(1)"` measured
+# 4.4s, and the full probe 77s under build load. With the previous 10s timeout
+# every service sat permanently `unhealthy` with a failing streak in the
+# thousands while the processes themselves were fine — a false alarm that hides
+# real failures and can drive the watchdog into pointless recovery.
+#
+# The budget below is sized for the slow case rather than the ideal one. The
+# interval is deliberately long too: each probe costs a whole interpreter start,
+# so probing often is itself a load problem on a small box.
 x-healthcheck-defaults: &healthcheck-defaults
-  interval: 30s
-  timeout: 10s
-  retries: 5
-  start_period: 30s
+  interval: 60s
+  timeout: 45s
+  retries: 3
+  start_period: 120s
 
 services:
   # ---------------------------------------------------------------------------
@@ -155,7 +169,12 @@ services:
       - backend
       - database
     ports:
-      - "${API_PORT:-8000}:8000"
+      # Bound to loopback by default. The API has POST endpoints that change the
+      # trading mode, reset the Kill Switch and trip the Circuit Breaker, and
+      # authentication is off by default — published on 0.0.0.0 those are
+      # reachable by anything that can route to this host. Set API_BIND to a LAN
+      # address (or 0.0.0.0) only once you have decided who should reach it.
+      - "${API_BIND:-127.0.0.1}:${API_PORT:-8000}:8000"
     healthcheck:
       <<: *healthcheck-defaults
       test: ["CMD", "python", "-m", "hades.ops.healthcheck"]
@@ -243,7 +262,9 @@ services:
     networks:
       - frontend
     ports:
-      - "${DASHBOARD_PORT:-5173}:5173"
+      # Same posture as the API: the dashboard drives it, so exposing one
+      # without the other buys nothing. See API_BIND above.
+      - "${DASHBOARD_BIND:-127.0.0.1}:${DASHBOARD_PORT:-5173}:5173"
     healthcheck:
       <<: *healthcheck-defaults
       test: ["CMD-SHELL", "wget -q --spider http://localhost:5173/ || exit 1"]

@@ -48,10 +48,23 @@ async def config(container: Container = Depends(get_container)) -> dict[str, obj
             "sources": s.scanner.sources.split(","),
             "min_liquidity_usd": s.scanner.min_liquidity_usd,
         },
-        "scoring": {
-            "min_security_score": s.scoring.min_security_score,
-            "min_wallet_score": s.scoring.min_wallet_score,
-            "min_final_score": s.scoring.min_final_score,
+        # The thresholds that actually gate a token, from the engines that
+        # enforce them. `ScoringSettings` carries near-identically named fields
+        # (SCORING_MIN_SECURITY_SCORE and friends) that nothing reads — the
+        # scoring context is not wired into any runtime — and this endpoint used
+        # to publish those. Both default to 60, so the two agreed until an
+        # operator changed one; then the screen would confirm a setting that had
+        # no effect. Report what decides.
+        "security": {
+            "min_security_score": s.security.min_security_score,
+            "doubt_buffer": s.security.doubt_buffer,
+            "honeypot_enabled": s.security.honeypot_enabled,
+        },
+        "signal_gates": {
+            "min_prob_roi_positive": s.risk.min_prob_roi_positive,
+            "min_confidence": s.risk.min_confidence,
+            "min_developer_score": s.risk.min_developer_score,
+            "min_liquidity_usd": s.risk.min_liquidity_usd,
         },
         "infrastructure": {
             "event_bus_transport": s.event_bus.transport,

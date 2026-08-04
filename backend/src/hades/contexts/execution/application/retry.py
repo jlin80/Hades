@@ -82,6 +82,4 @@ class RetryEngine:
                 if on_retry is not None:
                     await on_retry(attempt, exc)
                 continue
-        raise RetryableError(
-            f"operation failed after {self._policy.max_attempts} attempts: {last}"
-        )
+        raise RetryableError(f"operation failed after {self._policy.max_attempts} attempts: {last}")

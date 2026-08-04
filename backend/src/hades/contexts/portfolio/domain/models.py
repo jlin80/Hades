@@ -128,6 +128,15 @@ class PersistedPosition(ValueObject):
     ``OpenPositionView``: the portfolio owns what it persists, and the domain
     layer here depends on nothing but ``common``. The manager converts at the
     boundary, which is also where a schema change would have to be handled.
+
+    ``entry_price``, ``quantity`` and ``tags`` are not used by the portfolio's own
+    accounting — notional is enough for that — but without them a restart could
+    not rebuild the Position Monitor's view of the book. The portfolio survived a
+    restart and the monitor did not, so a recovered position was marked by
+    nobody: its unrealised PnL sat at exactly zero forever and no take-profit or
+    stop-loss could ever fire again. They are optional so snapshots written
+    before this field existed still load; such a position cannot be re-monitored
+    and is reported rather than silently stranded.
     """
 
     token: TokenRef
@@ -139,6 +148,20 @@ class PersistedPosition(ValueObject):
     narrative: str | None = None
     regime: str = "unknown"
     opened_at: datetime | None = None
+    #: Entry facts + the exit envelope approved at entry, for monitor recovery.
+    entry_price: Decimal | None = None
+    quantity: Decimal | None = None
+    tags: dict[str, str] = Field(default_factory=dict)
+
+    @property
+    def is_monitorable(self) -> bool:
+        """Can a restarted Position Monitor take this position back over?"""
+        return (
+            self.entry_price is not None
+            and self.quantity is not None
+            and self.entry_price > 0
+            and self.quantity > 0
+        )
 
 
 class PersistedPortfolio(ValueObject):

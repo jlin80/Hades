@@ -50,6 +50,8 @@ from hades.contexts.portfolio.domain.events import (
     PositionUpdated,
     TrailingStopAdjusted,
 )
+from hades.contexts.strategy.domain.events import EnsembleSignalGenerated
+from hades.contexts.strategy.domain.models import SignalType
 from hades.shared_kernel.domain.events import DomainEvent
 from hades.shared_kernel.events import EventBus
 from hades.shared_kernel.logging import get_logger
@@ -79,6 +81,9 @@ class _Monitored:
     trailing_armed: bool = False
     #: Set once an exit order is in flight so a slow fill cannot be double-sold.
     exiting: bool = False
+    #: When the latch above was set, so a latch that never clears can be caught.
+    #: ``0.0`` means "not latched".
+    exiting_since: float = 0.0
     opened_at: float = field(default_factory=time.monotonic)
 
     def take_profit_price(self) -> Decimal:
@@ -105,13 +110,23 @@ class PositionMonitor:
         event_bus: EventBus,
         interval_seconds: float = 5.0,
         max_slippage_bps: int = 300,
+        honour_strategy_exits: bool = False,
+        exit_latch_timeout_seconds: float = 120.0,
     ) -> None:
         self._engine = engine
         self._oracle = price_oracle
         self._bus = event_bus
         self._interval = max(0.5, interval_seconds)
         self._max_slippage_bps = max_slippage_bps
+        # When the Strategy Engine gates risk, its SELL/EXIT verdicts are also
+        # honoured here. Off by default: the same flag turns both directions on,
+        # so an operator enabling the Strategy Engine gets one switch, not two.
+        self._honour_strategy_exits = honour_strategy_exits
+        # How long an exit may stay in flight before the latch is force-released.
+        # Generous relative to a fill, tiny relative to "forever".
+        self._exit_latch_timeout = max(10.0, exit_latch_timeout_seconds)
         self._positions: dict[str, _Monitored] = {}
+        self._requested_exits: dict[str, str] = {}
         self._stop = asyncio.Event()
 
     @property
@@ -121,6 +136,39 @@ class PositionMonitor:
     def register(self, event_bus: EventBus) -> None:
         event_bus.subscribe(PositionOpened.__name__, self._on_opened)
         event_bus.subscribe(PositionClosed.__name__, self._on_closed)
+        if self._honour_strategy_exits:
+            event_bus.subscribe(EnsembleSignalGenerated.__name__, self._on_ensemble)
+
+    async def _on_ensemble(self, event: DomainEvent) -> None:
+        """A strategy SELL/EXIT on a token we hold becomes an exit request.
+
+        These verdicts used to die in the ensemble: the Strategy Engine could
+        emit them and no subscriber existed, so the only way out of a position
+        was the TP/SL envelope approved at entry.
+
+        The request is *recorded*, not acted on here. It is honoured on the next
+        tick, at a price the oracle actually returned, through the same
+        ``_exit`` path as every other exit — so a strategy cannot cause a sale at
+        a price nobody quoted, and the latch that prevents double-selling still
+        applies. And it can only ever close a position: there is no path from
+        this handler to opening one.
+        """
+        if not isinstance(event, EnsembleSignalGenerated):
+            return
+        decision = event.ensemble.decision
+        if decision not in (SignalType.SELL, SignalType.EXIT):
+            return
+        mint = str(event.token.mint)
+        for position in self._positions.values():
+            if str(position.token.mint) == mint and not position.exiting:
+                self._requested_exits[position.position_id] = f"strategy_{decision.value}"
+                _logger.info(
+                    "strategy_exit_requested",
+                    position_id=position.position_id,
+                    mint=mint,
+                    decision=decision.value,
+                    score=round(float(event.ensemble.score), 4),
+                )
 
     # -- lifecycle ------------------------------------------------------------
 
@@ -168,7 +216,71 @@ class PositionMonitor:
             peak_price=entry,
         )
 
+    def resume(
+        self,
+        *,
+        position_id: str,
+        token: TokenRef,
+        entry_price: Decimal,
+        quantity: Decimal,
+        tags: dict[str, str],
+        peak_price: Decimal | None = None,
+    ) -> bool:
+        """Take a position opened before this process started back under watch.
+
+        The monitor learns about positions only from live ``PositionOpened``
+        events, but the portfolio book is persisted and rehydrates on startup.
+        Without this, a position that survived a restart was owned by the book
+        and watched by nobody: never marked to market, and unreachable by the
+        take-profit or stop-loss approved for it. It could only ever be closed
+        by hand.
+
+        ``peak_price`` restores the trailing high-water mark where it is known;
+        falling back to the entry price is deliberately conservative, since it
+        can only place the trailing stop lower than the true peak would.
+        """
+        if entry_price <= 0 or quantity <= 0:
+            _logger.warning(
+                "position_not_resumed",
+                position_id=position_id,
+                reason="non-positive entry price or quantity",
+            )
+            return False
+        if position_id in self._positions:
+            return False
+        peak = peak_price if peak_price is not None and peak_price > entry_price else entry_price
+        trailing_enabled = tags.get(TAG_TRAILING_ENABLED, "false") == "true"
+        activation = _as_float(tags.get(TAG_TRAILING_ACTIVATION_PCT), 0.0)
+        monitored = _Monitored(
+            position_id=position_id,
+            token=token,
+            entry_price=entry_price,
+            quantity=quantity,
+            take_profit_pct=_as_float(tags.get(TAG_TAKE_PROFIT_PCT), 0.0),
+            stop_loss_pct=_as_float(tags.get(TAG_STOP_LOSS_PCT), 0.0),
+            trailing_enabled=trailing_enabled,
+            trailing_activation_pct=activation,
+            trailing_distance_pct=_as_float(tags.get(TAG_TRAILING_DISTANCE_PCT), 0.0),
+            peak_price=peak,
+        )
+        # Re-arm the trailing stop if the recovered peak already cleared the
+        # activation level, so a restart cannot silently disarm it.
+        monitored.trailing_armed = trailing_enabled and peak >= monitored.trailing_arm_price()
+        self._positions[position_id] = monitored
+        _logger.info(
+            "position_resumed",
+            position_id=position_id,
+            mint=str(token.mint),
+            symbol=token.symbol or str(token.mint)[:8],
+            entry_price=float(entry_price),
+            take_profit_pct=monitored.take_profit_pct,
+            stop_loss_pct=monitored.stop_loss_pct,
+            trailing_armed=monitored.trailing_armed,
+        )
+        return True
+
     async def _on_closed(self, event: DomainEvent) -> None:
+        self._requested_exits.pop(str(event.aggregate_id), None)
         if not isinstance(event, PositionClosed):
             return
         self._positions.pop(str(event.aggregate_id), None)
@@ -177,13 +289,31 @@ class PositionMonitor:
 
     async def tick(self) -> None:
         """Price the book once: mark every position, then exit those breached."""
+        self._release_stuck_latches()
         open_positions = [p for p in self._positions.values() if not p.exiting]
         if not open_positions:
             return
 
         prices = await self._prices({p.token for p in open_positions})
         if not prices:
+            # Silence here is indistinguishable from a quiet market: the book
+            # simply stops being marked, unrealised PnL freezes at its last
+            # value, and no stop-loss can fire — while every component still
+            # reports itself healthy. An oracle that cannot price the book is an
+            # outage in the exit path and has to say so.
+            _logger.error(
+                "position_book_unpriced",
+                positions=len(open_positions),
+                note="price oracle returned nothing — marks and exits are stalled",
+            )
             return
+        unpriced = [p for p in open_positions if str(p.token.mint) not in prices]
+        if unpriced:
+            _logger.warning(
+                "positions_unpriced",
+                count=len(unpriced),
+                mints=[str(p.token.mint) for p in unpriced[:10]],
+            )
 
         for position in open_positions:
             price = prices.get(str(position.token.mint))
@@ -191,7 +321,13 @@ class PositionMonitor:
                 continue
             try:
                 await self._mark(position, price)
+                # The approved envelope is checked first. A strategy asking to
+                # leave must never override a stop-loss that has already been
+                # crossed: the stop is the loss the Risk Manager sized the trade
+                # around, and it should be the reason of record for the exit.
                 reason = self._breached(position, price)
+                if reason is None:
+                    reason = self._requested_exits.pop(position.position_id, None)
                 if reason is not None:
                     await self._exit(position, price, reason)
             except Exception as exc:  # one token must never stall the others
@@ -201,6 +337,41 @@ class PositionMonitor:
                     mint=str(position.token.mint),
                     error=str(exc),
                 )
+
+    def _release_stuck_latches(self) -> None:
+        """Free any position whose exit latch has outlived a plausible fill.
+
+        Defence in depth, deliberately independent of *why* the latch stuck. The
+        specific bug this was written for is fixed above, but the failure mode it
+        produced — a position quietly excluded from every tick, unmarked and
+        unexitable, with nothing logged — is severe enough that it should not
+        depend on one code path staying correct. Any future path that strands the
+        latch is caught here within a bounded time and says so loudly.
+        """
+        now = time.monotonic()
+        for position in self._positions.values():
+            if not position.exiting or position.exiting_since <= 0.0:
+                continue
+            waited = now - position.exiting_since
+            if waited < self._exit_latch_timeout:
+                continue
+            self._unlatch(position, f"latch stuck for {waited:.0f}s")
+            _logger.error(
+                "position_exit_latch_released",
+                position_id=position.position_id,
+                mint=str(position.token.mint),
+                waited_seconds=round(waited, 1),
+                note=(
+                    "an exit was latched and never completed; the position was "
+                    "invisible to the monitor until now"
+                ),
+            )
+
+    @staticmethod
+    def _unlatch(position: _Monitored, why: str) -> None:
+        position.exiting = False
+        position.exiting_since = 0.0
+        _logger.info("position_unlatched", position_id=position.position_id, why=why)
 
     async def _prices(self, tokens: set[TokenRef]) -> dict[str, Decimal]:
         batch = getattr(self._oracle, "prices_usd", None)
@@ -258,6 +429,7 @@ class PositionMonitor:
 
     async def _exit(self, position: _Monitored, price: Decimal, reason: str) -> None:
         position.exiting = True
+        position.exiting_since = time.monotonic()
         notional = position.quantity * price
         _logger.info(
             "position_exit_triggered",
@@ -277,17 +449,42 @@ class PositionMonitor:
             tags={TAG_EXIT_REASON: reason},
         )
         try:
-            await self._engine.execute(request)
+            fill = await self._engine.execute(request)
         except Exception as exc:
-            # The exit failed to execute; un-latch so the next cycle retries
-            # rather than stranding the position with nothing watching it.
-            position.exiting = False
+            # The exit raised; un-latch so the next cycle retries rather than
+            # stranding the position with nothing watching it.
+            self._unlatch(position, f"exit raised: {exc}")
             _logger.error(
                 "position_exit_failed",
                 position_id=position.position_id,
                 mint=str(position.token.mint),
                 reason=reason,
                 error=str(exc),
+            )
+            return
+
+        # The engine is deliberately fail-soft: a rejected or failed order comes
+        # back as a FillReport with ``filled`` false and is announced as
+        # ``OrderFailed`` — it does **not** raise. So the ``except`` above was
+        # unreachable for the ordinary failure, and the latch set at the top of
+        # this method was never cleared.
+        #
+        # The consequence was silent and permanent. A latched position is skipped
+        # by every subsequent tick, so it stopped being marked (its unrealised PnL
+        # froze at its last value), its stop-loss could never fire again, and no
+        # PositionClosed ever arrived to remove it. Nothing raised, nothing was
+        # logged, every component reported healthy, and the equity curve simply
+        # stopped moving — which is exactly the symptom this platform spent the
+        # audit chasing.
+        if not fill.filled:
+            self._unlatch(position, f"exit not filled: {fill.status.value}")
+            _logger.error(
+                "position_exit_not_filled",
+                position_id=position.position_id,
+                mint=str(position.token.mint),
+                reason=reason,
+                status=fill.status.value,
+                note="un-latched; the next priced tick will re-evaluate the envelope",
             )
 
 

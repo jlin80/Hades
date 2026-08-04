@@ -63,10 +63,19 @@ class MetadataProvider(Protocol):
     an aggregator's socials). It returns whatever it could learn as a partial
     :class:`TokenMetadata`; the collector merges them. It must never raise —
     return ``None`` on failure so one bad provider cannot block collection.
+
+    ``provides`` names the fields this provider is a source for. It exists so the
+    collector can tell "the token has no decimals" apart from "the only provider
+    that could have told us about decimals was down" — the two look identical in
+    the merged result but mean completely different things to the Quality
+    Validator. A provider that omits it is treated as a source for every field.
     """
 
     @property
     def name(self) -> str: ...
+
+    @property
+    def provides(self) -> frozenset[str]: ...
 
     async def collect(self, token: TokenRef) -> TokenMetadata | None: ...
 

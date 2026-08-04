@@ -26,7 +26,7 @@ from hades.contexts.scanner.domain.ports import (
 from hades.shared_kernel.config.settings import ScannerSettings
 from hades.shared_kernel.domain.identifiers import new_id
 from hades.shared_kernel.events import EventBus
-from hades.shared_kernel.logging import get_logger
+from hades.shared_kernel.logging import describe, get_logger
 
 _logger = get_logger("scanner.discovery")
 
@@ -94,7 +94,7 @@ class DiscoveryEngine:
                 raise
             except Exception as exc:
                 await self._mark_source(source.name, up=False, detail=str(exc))
-                _logger.warning("discovery_source_error", source=source.name, error=str(exc))
+                _logger.warning("discovery_source_error", source=source.name, error=describe(exc))
                 await self._sleep_or_stop(stop, backoff)
                 backoff = min(_BACKOFF_MAX, backoff * 2)
             else:

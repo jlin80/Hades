@@ -18,6 +18,7 @@ from hades.contexts.risk.application.policies import (
     CorrelationPolicy,
     DeveloperPolicy,
     DrawdownPolicy,
+    EnsembleConsensusPolicy,
     ExposurePolicy,
     LiquidityPolicy,
     MaxPositionsPolicy,
@@ -39,7 +40,12 @@ from hades.contexts.risk.domain.models import (
     RiskConfig,
     SizingConfig,
 )
-from hades.contexts.risk.domain.ports import RiskAuditStore, RiskPolicy, RiskStateStore
+from hades.contexts.risk.domain.ports import (
+    ExplorationPort,
+    RiskAuditStore,
+    RiskPolicy,
+    RiskStateStore,
+)
 from hades.shared_kernel.config import Settings
 from hades.shared_kernel.events import EventBus
 
@@ -104,27 +110,57 @@ def risk_config_from_settings(settings: Settings) -> RiskConfig:
         min_developer_score=r.min_developer_score,
         max_wallet_risk=r.max_wallet_risk,
         min_liquidity_usd=r.min_liquidity_usd,
+        gate_on_ensemble=settings.strategy.gate_risk,
+        min_ensemble_score=settings.strategy.gate_min_ensemble_score,
     )
 
 
 def build_risk_manager(
     config: RiskConfig,
     *,
+    exploration: ExplorationPort | None = None,
     event_bus: EventBus | None = None,
     audit: RiskAuditStore | None = None,
     state_store: RiskStateStore | None = None,
     notifier: NotificationPublisher | None = None,
     metrics: RiskMetrics | None = None,
 ) -> RiskManager:
-    """Wire every engine and policy into a ready-to-use Risk Manager."""
-    quality: tuple[RiskPolicy, ...] = (
-        MinProbabilityPolicy(config.sizing),
-        MinConfidencePolicy(config.sizing),
+    """Wire every engine and policy into a ready-to-use Risk Manager.
+
+    The membership of the two pre-sizing tuples is the security boundary of the
+    exploration programme, and it is decided *here*, once, in a file whose whole
+    job is composition:
+
+    * **safety** — is this token fit to touch at any size at all? A rug check, a
+      developer with a history, a wallet cluster that looks like a setup, a pool
+      too thin to exit. No grant, no budget and no configuration can waive one of
+      these, because the manager only consults the *other* tuple when deciding
+      what an exploration grant may cover.
+    * **conviction** — is the opportunity good enough to back with real size?
+      Probability and confidence: the two gates that are, by construction,
+      unpassable while the memory is empty, and therefore exactly the deadlock
+      exploration exists to break.
+
+    Splitting them costs nothing at runtime (the chain runs in the same order it
+    always did) and buys the one property that matters: a rule added to the
+    safety tuple next year is protected from exploration by default, without
+    anyone having to remember that exploration exists.
+    """
+    safety: tuple[RiskPolicy, ...] = (
         SecurityPolicy(config.sizing),
         DeveloperPolicy(config.min_developer_score),
         WalletPolicy(config.max_wallet_risk),
         LiquidityPolicy(config.min_liquidity_usd),
     )
+    conviction: tuple[RiskPolicy, ...] = (
+        MinProbabilityPolicy(config.sizing),
+        MinConfidencePolicy(config.sizing),
+    )
+    if config.gate_on_ensemble:
+        # Appended rather than inserted: probability and confidence are the
+        # cheaper checks and stay first, so the common rejection still costs one
+        # comparison. Conviction tier, so exploration may waive it.
+        conviction = (*conviction, EnsembleConsensusPolicy(config.min_ensemble_score))
     allocation: tuple[RiskPolicy, ...] = (
         MaxPositionsPolicy(config.rates),
         CapitalPolicy(),
@@ -137,10 +173,12 @@ def build_risk_manager(
     return RiskManager(
         config=config,
         sizing=PositionSizingEngine(config.sizing),
-        quality_policies=quality,
+        quality_policies=safety,
+        conviction_policies=conviction,
         allocation_policies=allocation,
         kill_switch=KillSwitch(config.kill_switch),
         circuit_breaker=CircuitBreaker(config.circuit_breaker),
+        exploration=exploration,
         event_bus=event_bus,
         audit=audit,
         state_store=state_store,

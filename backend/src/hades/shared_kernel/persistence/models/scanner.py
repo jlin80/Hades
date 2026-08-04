@@ -12,7 +12,16 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Numeric, String, Text
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Integer,
+    Numeric,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -52,14 +61,27 @@ class TokenMetadataRecord(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
 
 class DataAnomaly(UUIDPrimaryKeyMixin, TimestampMixin, Base):
-    """A datum the Quality Validator rejected or flagged (audit of data health)."""
+    """A datum the Quality Validator rejected or flagged (audit of data health).
+
+    One row per distinct *problem* — ``(subject, kind, field)`` — not per
+    sighting. The Scanner re-processes the same mint on every rediscovery, so an
+    append-only log turned one persistent issue into thousands of identical rows
+    and made the total say more about scan frequency than about data health.
+    ``occurrences`` carries the count that the extra rows used to carry, and
+    ``detected_at`` tracks the most recent sighting.
+    """
 
     __tablename__ = "data_anomalies"
+    __table_args__ = (
+        UniqueConstraint("subject", "kind", "field", name="uq_data_anomalies_problem"),
+    )
 
     subject: Mapped[str] = mapped_column(String(120), index=True, nullable=False)
     kind: Mapped[str] = mapped_column(String(40), index=True, nullable=False)
     field: Mapped[str] = mapped_column(String(120), nullable=False)
     detail: Mapped[str] = mapped_column(Text, nullable=False)
+    occurrences: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    first_detected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     detected_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), index=True, nullable=False
     )

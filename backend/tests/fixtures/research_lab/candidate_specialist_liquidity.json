@@ -1,0 +1,39 @@
+{
+  "bundle_format": "hades.candidate/v1",
+  "candidate_id": "liquidity-fixture0001",
+  "checksum": "e659d4e63c5ead9a4ce39552dbeb89b4c67d7f1856c7b246071d43c2f038267e",
+  "dataset_id": "ds-2026-07",
+  "evidence": {
+    "lab_metrics": {},
+    "oos_auc": 0.69,
+    "walkforward_folds": 5
+  },
+  "feature_names": [
+    "basic.liquidity",
+    "basic.liquidity_to_mcap",
+    "pool.depth_usd",
+    "pool.lp_locked"
+  ],
+  "heads": {},
+  "kind": "committee_model",
+  "metrics": {
+    "auc": 0.72,
+    "brier": 0.18,
+    "samples": 1200.0
+  },
+  "model_kind": "logistic",
+  "name": "liquidity",
+  "notes": "walk-forward validated, 5 folds",
+  "produced_at": "2026-07-29T09:30:00+00:00",
+  "produced_by": "hades-research-lab",
+  "trained_on_samples": 1200,
+  "weights": {
+    "bias": -0.42,
+    "coefficients": {
+      "basic.liquidity": 1.21,
+      "basic.liquidity_to_mcap": -0.19,
+      "pool.depth_usd": 0.33,
+      "pool.lp_locked": 0.68
+    }
+  }
+}

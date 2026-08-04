@@ -174,8 +174,9 @@ class LogTailer:
 
     async def _read_once(self, sink: Any) -> None:
         client = self._provider.client()
-        response = await client.xread({LOG_STREAM_KEY: self._last_id}, count=_BATCH,
-                                      block=_TAIL_BLOCK_MS)
+        response = await client.xread(
+            {LOG_STREAM_KEY: self._last_id}, count=_BATCH, block=_TAIL_BLOCK_MS
+        )
         if not response:
             return
         for _stream, entries in response:

@@ -26,7 +26,7 @@ from hades.contexts.learning.domain.events import (
 )
 from hades.contexts.research.domain.events import (
     PromotionRejected,
-    StrategyPromoted,
+    ResearchStrategyPromoted,
 )
 from hades.contexts.risk.domain.events import (
     CircuitBreakerReset,
@@ -40,10 +40,8 @@ from hades.contexts.risk.domain.events import (
 )
 from hades.contexts.strategy.domain.events import (
     StrategyDisabled,
+    StrategyPromoted,
     WeightUpdated,
-)
-from hades.contexts.strategy.domain.events import (
-    StrategyPromoted as StrategyEnginePromoted,
 )
 from hades.shared_kernel.domain.events import DomainEvent
 from hades.shared_kernel.events import EventBus
@@ -57,9 +55,9 @@ _AUDITED: dict[type[DomainEvent], str] = {
     ModelPromoted: "model_promoted",
     ModelPromotionProposed: "model_promotion_proposed",
     ModelRejected: "model_rejected",
-    StrategyPromoted: "research_strategy_promoted",
+    ResearchStrategyPromoted: "research_strategy_promoted",
     PromotionRejected: "research_promotion_rejected",
-    StrategyEnginePromoted: "strategy_promoted",
+    StrategyPromoted: "strategy_promoted",
     WeightUpdated: "strategy_weight_updated",
     StrategyDisabled: "strategy_disabled",
     KillSwitchLevelChanged: "kill_switch_level_changed",

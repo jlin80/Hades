@@ -73,7 +73,17 @@ class QualityValidator:
         accepted = not any(i.fatal for i in issues)
         return ValidationOutcome(accepted=accepted, issues=tuple(issues))
 
-    def validate_metadata(self, metadata: TokenMetadata) -> ValidationOutcome:
+    def validate_metadata(
+        self, metadata: TokenMetadata, *, uncollected: frozenset[str] = frozenset()
+    ) -> ValidationOutcome:
+        """Validate merged metadata.
+
+        ``uncollected`` names fields whose every provider failed this round. A
+        ``None`` there is an absence of *evidence*, not evidence of absence, so
+        it is not reported as incomplete data — otherwise one unreachable RPC
+        endpoint manufactures an "incomplete" anomaly for every token it fails
+        on, and the anomaly log describes our own outage as the tokens' defect.
+        """
         issues: list[QualityIssue] = []
         if metadata.decimals is not None and not (0 <= metadata.decimals <= _MAX_DECIMALS):
             issues.append(
@@ -101,7 +111,7 @@ class QualityValidator:
             ("symbol", bool(metadata.symbol)),
             ("decimals", metadata.decimals is not None),
         ):
-            if not present:
+            if not present and field_name not in uncollected:
                 issues.append(
                     QualityIssue(
                         kind=AnomalyKind.INCOMPLETE,
@@ -114,7 +124,7 @@ class QualityValidator:
         return ValidationOutcome(accepted=accepted, issues=tuple(issues))
 
     def validate_collected(self, collected: CollectedMetadata) -> ValidationOutcome:
-        return self.validate_metadata(collected.metadata)
+        return self.validate_metadata(collected.metadata, uncollected=collected.unavailable)
 
     def validate_features(self, values: dict[str, float]) -> ValidationOutcome:
         """Reject NaN/inf; flag extreme z-score outliers within the vector."""

@@ -21,12 +21,15 @@ from hades.ops.intelligence_runtime import (
     INTELLIGENCE_STATUS_NAMESPACE,
 )
 from hades.shared_kernel.cache import CacheService
+from hades.shared_kernel.logging import describe, get_logger
 from hades.shared_kernel.persistence.models import (
     IntelClusterRecord,
     WalletProfileRecord,
     WalletRelationshipRecord,
     WalletTimelineRecord,
 )
+
+_logger = get_logger("api.intelligence")
 
 router = APIRouter(prefix="/api/v1/intelligence", tags=["intelligence"])
 
@@ -74,7 +77,8 @@ async def wallet_timeline(
                     .limit(min(limit, 500))
                 )
             ).all()
-    except Exception:  # never fail the dashboard on a DB hiccup
+    except Exception as exc:  # never fail the dashboard on a DB hiccup
+        _logger.warning("api_query_failed", endpoint="wallet_timeline", error=describe(exc))
         return {"address": address, "timeline": []}
     return {
         "address": address,
@@ -109,7 +113,8 @@ async def wallet_relationships(
                     .limit(min(limit, 500))
                 )
             ).all()
-    except Exception:
+    except Exception as exc:
+        _logger.warning("api_query_failed", endpoint="wallet_relationships", error=describe(exc))
         return {"address": address, "relationships": []}
     return {
         "address": address,
@@ -141,7 +146,8 @@ async def clusters(
                     .limit(min(limit, 200))
                 )
             ).all()
-    except Exception:
+    except Exception as exc:
+        _logger.warning("api_query_failed", endpoint="clusters", error=describe(exc))
         return {"clusters": []}
     return {
         "clusters": [
@@ -175,7 +181,8 @@ async def smart_money(
                     .limit(min(limit, 200))
                 )
             ).all()
-    except Exception:
+    except Exception as exc:
+        _logger.warning("api_query_failed", endpoint="smart_money", error=describe(exc))
         return {"wallets": []}
     return {"wallets": [_profile_view(r) for r in rows]}
 
@@ -187,7 +194,8 @@ async def _live_status(container: Container) -> dict[str, Any] | None:
     cache = CacheService(container.redis, namespace=INTELLIGENCE_STATUS_NAMESPACE)
     try:
         result = await cache.get(INTELLIGENCE_STATUS_KEY)
-    except Exception:  # dashboard must render even if Redis is down
+    except Exception as exc:  # dashboard must render even if Redis is down
+        _logger.warning("api_query_failed", endpoint="_live_status", error=describe(exc))
         return None
     return result if isinstance(result, dict) else None
 
@@ -207,7 +215,8 @@ async def _counts(container: Container) -> dict[str, Any]:
             clusters_total = await session.scalar(
                 select(func.count()).select_from(IntelClusterRecord)
             )
-    except Exception:  # never fail the endpoint on a DB hiccup
+    except Exception as exc:  # never fail the endpoint on a DB hiccup
+        _logger.warning("api_query_failed", endpoint="_counts", error=describe(exc))
         return empty
     return {
         "wallets_total": int(wallets or 0),

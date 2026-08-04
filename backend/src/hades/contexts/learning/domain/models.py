@@ -307,6 +307,12 @@ class CommitteePrediction(ValueObject):
     explanation: CommitteeExplanation | None = None
     model_versions: dict[str, str] = Field(default_factory=dict)
     feature_coverage: float = Field(default=1.0, ge=0.0, le=1.0)
+    #: What the platform already knew about this candidate when it judged it.
+    #: Persisted with the prediction because a verdict is only auditable
+    #: alongside the memory that informed it — and because the settled trade
+    #: later quotes these cohort keys back, so today's enrichment is what makes
+    #: tomorrow's possible.
+    enrichment: CandidateEnrichment | None = None
     shadow: bool = False  # produced by a shadow model — ignore for decisions
     correlation_id: str | None = None
     duration_ms: float | None = None
@@ -347,6 +353,208 @@ class DecisionContext(ValueObject):
     cluster_count: int = 0
     largest_cluster_pct: float = 0.0
     wallets_observed: int = 0
+    #: The cohort keys this candidate belongs to (developer, launchpad,
+    #: narrative, cluster, wallets…). Assembled by the same builder, from the
+    #: same reads, because asking the database a second time to answer "who is
+    #: this?" would be a second chance to get a different answer.
+    identity: CandidateIdentity | None = None
+
+
+# --- candidate enrichment (what the platform already knows) ------------------
+
+
+class HistoryDimension(StrEnum):
+    """The facets of memory a candidate is enriched along.
+
+    The list is closed on purpose: a dimension the enricher does not name is a
+    dimension nobody can notice is missing. Each member has one meaning and one
+    cohort rule, documented on :class:`HistoricalPrior`.
+    """
+
+    DEVELOPER = "developer"
+    WALLETS = "wallets"
+    CLUSTERS = "clusters"
+    NARRATIVE = "narrative"
+    LAUNCHPAD = "launchpad"
+    LIQUIDITY = "liquidity"
+    VOLATILITY = "volatility"
+    OUTCOMES = "outcomes"
+    STRATEGIES = "strategies"
+    HOLDERS = "holders"
+    PATTERNS = "patterns"
+
+
+class EvidenceBasis(StrEnum):
+    """What kind of evidence a prior rests on.
+
+    A prior built from settled trades and a prior built from observations are
+    both useful and are *not* interchangeable. Recording which is which stops a
+    reader — human or model — from treating a familiarity signal as a track
+    record.
+    """
+
+    #: Realised outcomes: decisions that were taken and settled.
+    OUTCOMES = "outcomes"
+    #: Recorded observations/assessments, with no outcome attached.
+    OBSERVATIONS = "observations"
+    #: The cohort was identified but the memory held nothing about it.
+    NONE = "none"
+
+
+class CandidateIdentity(ValueObject):
+    """Who a candidate *is*, in the terms the memory is indexed by.
+
+    Everything here is a cohort key: the mint itself, plus the attributes that
+    make this token comparable to tokens the platform has already lived through.
+    Any of them may be unknown — an absent key yields no cohort, never a guess.
+    """
+
+    mint: str
+    developer: str | None = None
+    launchpad: str | None = None
+    narrative: str | None = None
+    cluster_id: str | None = None
+    strategy: str | None = None
+    wallets: tuple[str, ...] = ()
+    liquidity_usd: float | None = None
+    volatility: float | None = None
+
+
+class HistoricalPrior(ValueObject):
+    """What the memory says about one cohort of one candidate.
+
+    ``positive_rate`` is the *shrunk* rate — the raw rate pulled toward 0.5 in
+    proportion to how little evidence supports it — so a single lucky trade never
+    reads as certainty. ``raw_positive_rate`` keeps the unshrunk number for the
+    dashboard. ``strength`` is how much this prior is allowed to matter, in
+    [0, 1]; it is zero whenever ``samples`` is zero, which is what makes an empty
+    memory an exactly neutral influence rather than a small random one.
+    """
+
+    dimension: HistoryDimension
+    key: str = ""
+    basis: EvidenceBasis = EvidenceBasis.NONE
+    samples: int = 0
+    positive_rate: float = Field(default=0.5, ge=0.0, le=1.0)
+    raw_positive_rate: float = Field(default=0.5, ge=0.0, le=1.0)
+    avg_roi: float = 0.0
+    strength: float = Field(default=0.0, ge=0.0, le=1.0)
+    detail: str = ""
+
+    @property
+    def is_informative(self) -> bool:
+        return self.samples > 0 and self.strength > 0.0
+
+
+class CandidateEnrichment(ValueObject):
+    """Everything the memory could say about a candidate, before it is judged.
+
+    This is the object that makes "the committee never evaluates a candidate
+    completely from scratch" a fact rather than an aspiration. It carries the
+    per-dimension priors, the bounded log-odds nudge they justify, and the
+    per-candidate ``sample_support`` — the honest answer to the confidence
+    engine's question *how many similar historical examples exist?*, which until
+    now was a constant read from configuration.
+
+    ``evidence_available`` is false when the memory was consulted and had
+    nothing. That is a real, recorded state: consulted-and-empty is not the same
+    as never consulted, and only one of them is a wiring defect.
+    """
+
+    identity: CandidateIdentity
+    priors: tuple[HistoricalPrior, ...] = ()
+    #: Bounded additive logit applied to the meta-model's heads. 0.0 when the
+    #: memory is empty, so an unenriched platform behaves exactly as before.
+    prior_log_odds: float = 0.0
+    #: Comparable historical examples, saturating at the configured target.
+    sample_support: float = Field(default=0.0, ge=0.0, le=1.0)
+    lessons_considered: int = 0
+    observations_considered: int = 0
+    evidence_available: bool = False
+    notes: tuple[str, ...] = ()
+    enriched_at: datetime | None = None
+    duration_ms: float | None = None
+
+    @property
+    def by_dimension(self) -> dict[str, HistoricalPrior]:
+        return {p.dimension.value: p for p in self.priors}
+
+    @property
+    def informative_dimensions(self) -> tuple[str, ...]:
+        return tuple(p.dimension.value for p in self.priors if p.is_informative)
+
+    @property
+    def total_samples(self) -> int:
+        return sum(p.samples for p in self.priors)
+
+    @classmethod
+    def empty(cls, identity: CandidateIdentity, *, note: str = "") -> CandidateEnrichment:
+        """A consulted-but-empty enrichment. Neutral by construction."""
+        return cls(identity=identity, notes=(note,) if note else ())
+
+
+class EnrichedCandidate(ValueObject):
+    """A decision context that has been through the enricher — the only input
+    the committee accepts.
+
+    The committee's ``evaluate`` takes this type and no other. That is the whole
+    enforcement mechanism for "no token reaches the AI Committee unenriched":
+    there is no overload, no optional argument and no default, so a caller that
+    skips enrichment cannot express itself.
+    """
+
+    context: DecisionContext
+    enrichment: CandidateEnrichment
+
+    @property
+    def token(self) -> TokenRef:
+        return self.context.token
+
+    @property
+    def at(self) -> datetime:
+        return self.context.at
+
+    @property
+    def vector(self) -> NormalizedVector:
+        return self.context.vector
+
+
+# --- historical evidence (what the memory hands back) ------------------------
+
+
+class HistoricalLesson(ValueObject):
+    """One settled decision as the committee reads it.
+
+    Deliberately the Learning context's own shape, not the Knowledge context's.
+    The adapter translates; nothing here depends on how the memory stores a
+    lesson, and the enricher can be tested with a handful of these and no
+    database at all.
+    """
+
+    subject: str
+    decided_at: datetime
+    features: dict[str, float] = Field(default_factory=dict)
+    #: The same features in the models' normalised space. Filled in by the
+    #: adapter, which caches lessons and so pays for the transformation once per
+    #: refresh rather than once per candidate — the difference between a cheap
+    #: comparison and a per-token pass over the whole history.
+    normalized: dict[str, float] = Field(default_factory=dict)
+    tags: dict[str, str] = Field(default_factory=dict)
+    realized_roi: float = 0.0
+    label_roi_positive: bool = False
+    label_hit_tp: bool = False
+    label_hit_sl: bool = False
+
+
+class HistoricalRecord(ValueObject):
+    """One remembered observation/assessment about a subject."""
+
+    subject: str
+    source: str = ""
+    kind: str = ""
+    occurred_at: datetime | None = None
+    features: dict[str, float] = Field(default_factory=dict)
+    payload: dict[str, float | str | bool] = Field(default_factory=dict)
 
 
 # --- model registry ----------------------------------------------------------
@@ -546,3 +754,12 @@ class FeatureImportance(ValueObject):
     @property
     def ranked(self) -> tuple[tuple[str, float], ...]:
         return tuple(sorted(self.importances.items(), key=lambda kv: kv[1], reverse=True))
+
+
+# ``CommitteePrediction`` names ``CandidateEnrichment`` before this module has
+# defined it (the prediction is the older type; enrichment was added later and
+# belongs next to the decision context it enriches). The rebuild is explicit
+# rather than left to pydantic's first-use resolution, so a broken reference
+# fails at import time instead of on the first token of a live run.
+CommitteePrediction.model_rebuild()
+DecisionContext.model_rebuild()

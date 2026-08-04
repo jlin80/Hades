@@ -99,11 +99,32 @@ class MetaModel:
     def heads(self) -> dict[str, ModelWeights]:
         return self._heads
 
-    def fuse(self, token: TokenRef, opinions: Sequence[Opinion]) -> MetaPrediction:
+    def fuse(
+        self, token: TokenRef, opinions: Sequence[Opinion], *, prior_log_odds: float = 0.0
+    ) -> MetaPrediction:
+        """Fuse the opinions, starting from what the platform already knows.
+
+        ``prior_log_odds`` is the Candidate Enricher's bounded summary of the
+        platform's own settled history for this candidate's cohorts — its
+        developer, its narrative, its wallet clusters, the tokens that looked
+        like it. It enters as an additive term on the logit, which is the only
+        place a prior belongs in a logistic model: it shifts the starting point,
+        it does not distort any specialist's contribution.
+
+        It defaults to ``0.0``, and that default is load-bearing. With an empty
+        memory the enricher yields exactly zero, so the fusion is bit-for-bit
+        what it was before this parameter existed. History can only ever add
+        information; it can never quietly relax the platform.
+
+        On the stop-loss head the prior enters **negated**: evidence that
+        candidates like this one have paid off is evidence they stopped out less
+        often, and applying the same sign to a head whose members carry negative
+        weights would have made good history argue for a higher P(SL).
+        """
         by_member = {o.member.value: o for o in opinions}
-        roi = self._head(ROI_POSITIVE, by_member)
-        tp = self._head(HIT_TP, by_member)
-        sl = self._head(HIT_SL, by_member)
+        roi = self._head(ROI_POSITIVE, by_member, prior_log_odds)
+        tp = self._head(HIT_TP, by_member, prior_log_odds)
+        sl = self._head(HIT_SL, by_member, -prior_log_odds)
         confidence = self._fusion_confidence(opinions)
         return MetaPrediction(
             token=token,
@@ -117,9 +138,9 @@ class MetaModel:
 
     # -- internals ------------------------------------------------------------
 
-    def _head(self, name: str, by_member: dict[str, Opinion]) -> float:
+    def _head(self, name: str, by_member: dict[str, Opinion], prior_log_odds: float = 0.0) -> float:
         weights = self._heads[name]
-        z = weights.bias
+        z = weights.bias + prior_log_odds
         for member, weight in weights.coefficients.items():
             opinion = by_member.get(member)
             if opinion is None or opinion.abstained:

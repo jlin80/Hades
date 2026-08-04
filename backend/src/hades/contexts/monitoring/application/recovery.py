@@ -21,6 +21,8 @@ Design choices:
 
 from __future__ import annotations
 
+import time
+from collections.abc import Callable
 from typing import Protocol, runtime_checkable
 
 from hades.contexts.notification.application.publisher import NotificationPublisher
@@ -108,12 +110,19 @@ class RecoveryOrchestrator:
         notifier: NotificationPublisher,
         metrics: MetricsRegistry | None = None,
         max_attempts: int = 3,
+        recovery_notice_interval_seconds: float = 900.0,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._actions = actions
         self._emergency = emergency
         self._notifier = notifier
         self._max_attempts = max_attempts
         self._attempts: dict[str, int] = {}
+        #: Minimum gap between "recovered" notifications for the same component.
+        #: A flapping component is one situation, not one per cycle.
+        self._notice_interval_seconds = recovery_notice_interval_seconds
+        self._clock = clock
+        self._last_recovery_notice: dict[str, float] = {}
         self._counter = (
             metrics.counter(
                 "hades_recovery_attempts_total",
@@ -193,6 +202,30 @@ class RecoveryOrchestrator:
             self._counter.labels(component=component, outcome=outcome).inc()
 
     async def _notify_recovered(self, component: str, action: str) -> None:
+        """Announce a recovery, but only once per quiet period per component.
+
+        Every success used to send a message. Success also resets the attempt
+        counter, so the "already exhausted" guard — which only engages after
+        repeated *failures* — never fired for a component that flaps. A
+        deployment produced a "Recovered: postgres" notification every few
+        seconds, for a database that was never actually down.
+
+        That is worse than untidy. An operator who learns their alert channel is
+        noise stops reading it, and the alert that matters arrives into a channel
+        nobody trusts. A recovery that keeps recurring is not good news to be
+        repeated; it is one situation, and it is reported once.
+        """
+        now = self._clock()
+        last = self._last_recovery_notice.get(component)
+        if last is not None and (now - last) < self._notice_interval_seconds:
+            _logger.debug(
+                "recovery_notice_suppressed",
+                component=component,
+                action=action,
+                since_last_seconds=round(now - last, 1),
+            )
+            return
+        self._last_recovery_notice[component] = now
         try:
             await self._notifier.notify(
                 title=f"Recovered: {component}",

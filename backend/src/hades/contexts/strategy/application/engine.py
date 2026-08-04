@@ -152,7 +152,6 @@ class StrategyEngine:
             context, signals, weights, correlation_id=_context_correlation(context)
         )
 
-
         self._ensembles_session += 1
         self._record_ensemble(ensemble)
         await self._publish(

@@ -122,17 +122,12 @@ class EnsembleBuilder:
         score: float,
         agreement: float,
     ) -> str:
-        actionable = [
-            c for c in contributions if not c.shadow and c.signal_type.is_actionable
-        ]
+        actionable = [c for c in contributions if not c.shadow and c.signal_type.is_actionable]
         top = sorted(actionable, key=lambda c: abs(c.contribution), reverse=True)[:3]
         leaders = ", ".join(f"{c.strategy}({c.contribution:+.2f})" for c in top)
         if decision is SignalType.IGNORE:
             return f"no consensus (net {score:+.2f}); leaders: {leaders or 'none'}"
-        return (
-            f"{decision.value} net {score:+.2f}, agreement {agreement:.0%}; "
-            f"led by {leaders}"
-        )
+        return f"{decision.value} net {score:+.2f}, agreement {agreement:.0%}; led by {leaders}"
 
 
 def _clamp01(value: float) -> float:

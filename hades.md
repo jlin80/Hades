@@ -14,11 +14,46 @@
 
 | | |
 |---|---|
-| **Current phase** | **Phase 11 — Production Hardening, Stage 2 (final code-quality & deployment closure)** |
+| **Current phase** | **Phase 4 — Exploration Mode: the budgeted, self-terminating answer to the cold start (§6p)** |
 | **Version** | `0.10.0` |
 | **Trading** | Paper only. Live execution is hard-gated OFF (two switches), blocked by the Production Checklist (any failing required subsystem or an active Emergency Mode refuses the switch to LIVE), **and** — as of Stage 2 — the switch to LIVE additionally requires an authenticated operator (never the implicit `system` principal). The Execution Engine remains the *only* component that knows the mode; everything upstream is mode-agnostic. |
-| **Backend tests** | **378 passing** · `mypy --strict` clean (407 src files) · **`ruff` clean (0 findings)** · suite runs **warnings-as-errors** |
+| **Backend tests** | **742 passing** · `mypy --strict` clean (456 src files) · **`ruff` clean (0 findings)** · suite runs **warnings-as-errors** |
+| **Cold start** | **Resolvable and now addressed.** The learning loop is closed (§6m), the lab feeds it (§6n), the brain reads it (§6o), and a budgeted Exploration programme buys the first ground-truth samples and switches itself off when the memory has them (§6p). Exploration is **off by default** and waives only the AI Committee's conviction gates — never a safety rule, never the defence layer, never an allocation limit. |
 | **Deployment** | `docker compose up -d` is now a complete, no-manual-steps bring-up: a one-shot `migrate` service applies the schema to head before any app service starts. |
+
+> **⚠️ Architecture audit, 2026-07-28 — read before planning any new capability.**
+> A full audit of the backend and of `HadesResearchLab` is recorded in
+> [`docs/ARCHITECTURE_AUDIT_2026-07-28.md`](docs/ARCHITECTURE_AUDIT_2026-07-28.md). It found
+> the code sound and the **event graph incomplete**: three open circuits meant the platform
+> could not learn from its own trades, no matter how it was configured.
+>
+> **Two of the three are closed by Phase 1 (§6m), the decision path now reads the memory
+> those phases built (Phase 3, §6o), and the deliberate bootstrap policy the audit asked for
+> is built (Phase 4, §6p).** What remains open:
+>
+> - `contexts/scoring` and `contexts/wallet` have **no wiring anywhere** (§4's context list
+>   describes them as pipeline stages — they are not).
+> - The whole pipeline runs in the single `worker` process while `engine` sits idle.
+> - The event store is still in-memory (H1), so incidents remain hard to reconstruct.
+>
+> Closed in Phase 1 (§6m): the learning loop's write path, and promotions taking effect
+> without a restart. Closed in Phase 3 (§6o): the loop's **read** path — the committee used to
+> judge every token as if the platform had never seen one, because nothing on the decision
+> path consulted permanent memory. A Candidate Enricher now sits between the context builder
+> and the committee, and no candidate can reach the brain without passing through it.
+>
+> Closed in Phase 4 (§6p): the cold start itself, in the way the audit asked for — a
+> deliberate bootstrap policy with its own budget and automatic shutdown, **not** a
+> recalibration. Exploration Mode may take a candidate the *conviction* gates muted, at a
+> fixed dollar-sized stake on an independent budget, only while the memory demonstrably lacks
+> the evidence to decide; it latches itself off the moment that stops being true.
+>
+> **The ordering rule still holds, and no threshold has been lowered to this day.** Lowering
+> them would have applied to all capital, permanently, on the strength of no evidence — which
+> is exactly the decision the evidence was meant to inform. Phase 3 changed nothing about the
+> thresholds (with an empty memory the enrichment is *exactly* neutral); Phase 4 changes
+> nothing about them either. It adds a separate, bounded, self-terminating path that buys
+> evidence — the cold start is answered with knowledge or it is not answered at all.
 
 Phase 1 established the architecture skeleton (bounded contexts, contracts,
 domain events, shared kernel). Phase 2 built the full platform the system runs on
@@ -220,6 +255,8 @@ research, notification, monitoring observe the whole flow.
 | **execution** | **The only paper↔live seam.** One `Executor` port, two adapters. | `OrderSubmitted/Filled/Failed` | `Executor`, `TransactionSigner` |
 | **learning** | Build datasets from history, retrain/evaluate, **propose** (never auto-promote). | `ModelTrained`, `ModelPromotionProposed` | `TrainingDataAssembler`, `ModelTrainer`, `ModelPublisher` |
 | **research** | Offline R&D on **copied** data. **No path to execution.** Human-gated promotion. | `ExperimentCompleted`, `CandidateProposed` | `ExperimentRunner`, `HistoricalDataReader` |
+| **exploration** | **The cold-start programme.** Decides whether a candidate the Risk Manager's *conviction* gates muted is worth a fixed, dollar-sized sample on an independent budget, while the memory demonstrably lacks evidence. **Authorises nothing** and switches itself off when the evidence is in (§6p). Off by default. | `ExplorationGranted`, `ExplorationSpent`, `ExplorationBudgetExhausted`, `ExplorationCompleted` | `EvidencePort`, `ExplorationLedgerStore` |
+| **knowledge** | **Permanent, verifiable memory.** Records from every producer; joins each decision with its realised outcome. **Cannot act** — imports no other context (§6m). | `KnowledgeRecorded`, `DecisionRecorded`, `LessonLearned` | `KnowledgeStore`, `LessonStore`, `DecisionJournalStore` |
 | **notification** | Outward alerts, severity-gated, transport-agnostic (Discord first). | — | `Notifier` |
 | **monitoring** | Watchdog (heartbeats) + Health Monitor (dependency probes → `/health`). | `ComponentHeartbeat`, `HealthDegraded/Recovered` | `HealthProbe`, `HeartbeatSink` |
 
@@ -739,10 +776,15 @@ VPS) and every output decomposes into legible per-feature contributions.
 
 ```
 scanner → features → security → intelligence → COMMITTEE
-     WalletIntelligenceComputed ─► [Decision Context Builder → Committee Manager]
+     WalletIntelligenceComputed ─► [Decision Context Builder → Candidate Enricher
+                                    → Committee Manager]
         → InferenceCompleted (×12) → CommitteeFinished → ConfidenceCalculated
         → PredictionGenerated → CommitteePredictionGenerated
 ```
+
+Since Phase 3 (§6o) the **Candidate Enricher** is a mandatory stage in that line: the manager
+accepts only an `EnrichedCandidate`, so no token is judged without the platform's own history
+of comparable tokens attached.
 
 The committee reacts to `WalletIntelligenceComputed` (the last analytical stage,
 fired for approved *and* rejected tokens). The **Decision Context Builder**
@@ -1494,6 +1536,868 @@ items are large, are *not* blockers for the paper-only posture, and — critical
 
 ---
 
+## 6m. Knowledge — permanent memory, and the end of cold start (Phase 1, 2026-07-28)
+
+The [architecture audit](docs/ARCHITECTURE_AUDIT_2026-07-28.md) found that Hades could not
+learn, and that the cause was not a threshold. `KnowledgeFeedback.record_outcome()` — the
+method that turns a closed trade into a training sample — had **no callers**. Every trade the
+platform ran produced its single most expensive datum, the realised result, and threw it away.
+The outcome ledger therefore held only weak negatives from `TokenRejected`: a **single-class
+dataset**, on which AUC is undefined, so `ValidationEngine.min_auc = 0.55` could never be met,
+so no candidate was ever validated, so the committee stayed on its default priors and
+`P(ROI+)` sat at 0.4626 against a 0.55 minimum. Lowering that minimum would have produced
+trades whose outcomes still reached nothing — activity that looks like progress and teaches
+the system nothing.
+
+Phase 1 closes the loop by introducing a new bounded context.
+
+### What Knowledge is
+
+An **append-only store of verifiable facts**, fed by every producer on the platform, plus the
+one piece of joining logic that was missing: it remembers the evidence behind a decision and
+pairs it, later, with that decision's realised outcome.
+
+| Concept | Meaning |
+|---|---|
+| `Observation` | One immutable thing the platform knows, tagged with its `KnowledgeSource` and a `Verification` level |
+| `Decision` | The feature vector **frozen at the moment a decision was taken** |
+| `Outcome` | What actually happened to that decision |
+| `Lesson` | `Decision ⋈ Outcome` — a training sample with ground truth and no leakage |
+
+**Verification is a first-class property, not a comment.** A backtest result and a settled
+paper trade are both knowledge; only one is ground truth. `REALISED > SIMULATED > REPORTED >
+UNVERIFIED`, ordered explicitly (`VERIFICATION_RANK`) because a SQL `>=` over the labels would
+compare them alphabetically and silently return the wrong set.
+
+### What Knowledge is not
+
+It takes no decision, sizes nothing and executes nothing. It has no concept of an order, a
+position, a balance or a trading mode — and **no way to acquire one**:
+
+    It does not import execution.  It does not import portfolio.
+    It does not import risk.       It does not import learning.
+
+`tests/test_knowledge_isolation.py` AST-parses the package and fails the build on any of them.
+The check is an **allowlist**, not a blocklist: Knowledge may depend on the shared kernel and
+nothing else, so a context added next year is covered without anyone remembering to add it.
+Learning is forbidden too, and for a subtler reason — the loop runs Knowledge → Committee, so
+an import the other way would make it a cycle.
+
+### How it hears about the world without importing anything
+
+Knowledge exposes exactly one inbound shape, `KnowledgeEnvelope`. The composition root
+(`ops/knowledge_runtime.py`) translates the platform's events into it, **subscribing by event
+name rather than by class**, so the wiring does not reintroduce the coupling the context
+refuses. That trade has an obvious cost — a renamed event would stop being recorded in silence
+— and the cost is paid in the test suite instead: every subscribed name is resolved against
+the platform's event registry, so a rename breaks the build rather than production.
+
+That check earned its keep immediately: it found that `OrderSubmitted` / `OrderFilled` /
+`OrderFailed` had been published since the Execution Engine shipped and **never registered**
+on the bus. Under the Redis transport `EventRegistry.rebuild` returns `None` for an unknown
+type and the event is discarded, so those fills had never been able to cross a process
+boundary. It went unnoticed only because their consumers happened to live in the same process.
+
+### The loop
+
+```
+FeaturesComputed   → remember the current vector for this mint
+TradeApproved      → FREEZE it: this is the evidence, and it is now immutable
+PositionOpened     → the frozen evidence gets the reference its outcome will quote
+PositionClosed     → settle → Lesson → LessonLearned → committee_outcomes
+```
+
+Two rules make it correct rather than merely present:
+
+- **Freeze at approval, never read at settlement.** The obvious implementation — wait for the
+  close, then ask the feature store what the token looks like — trains on the state of the
+  world at the moment of *sale*, labelled with the result of the trade. The design makes the
+  leaking version unwritable: settling takes an `Outcome` and nothing else, so there is no
+  feature store to consult. Pinned by
+  `test_the_lesson_uses_features_from_entry_not_from_exit`.
+- **Settle exactly once.** Delivery is at-least-once, so the journal *takes* a decision
+  (`DELETE … RETURNING` in Postgres) and `knowledge_lessons.ref` is unique. A duplicated
+  lesson raises nothing — it quietly doubles that trade's weight in every dataset built
+  afterwards.
+
+A close whose notional is unknown records **nothing** rather than inventing a denominator: a
+fabricated return in permanent memory is worse than a missing one, and the unresolved decision
+stays visible in the open-decision gauge.
+
+### Two more things Phase 1 fixed
+
+- **A promotion now reaches the running process.** `set_active()` ran only at startup and
+  nothing subscribed to `ModelPromoted`, so the entire human-gated promotion machinery worked
+  perfectly and changed nothing until the worker was restarted.
+- **Quality signals are measured, not configured.** `dataset_quality` and `sample_support`
+  were read once from settings and never recomputed — two numbers presented to the confidence
+  engine as measurements that were in fact the constants 0.5 and 0.35, forever. They are now
+  derived from the dataset: support saturates at `min_outcomes_to_train`, and quality is label
+  balance, which scores **0.0 for a single-class dataset** — the truth, and precisely the
+  state the platform was in.
+
+### Persistence & operation
+
+Three tables (migration `0010_knowledge_tables`): `knowledge_observations` and
+`knowledge_lessons` are append-only; `knowledge_decisions` holds open decisions and shrinks as
+they settle, so unbounded growth there is a visible symptom of the loop breaking rather than a
+silent one. Read-only API at `/api/v1/knowledge`, `/knowledge/lessons` and
+`/knowledge/status`. Config under `KNOWLEDGE_*`.
+
+The field worth watching is **`is_trainable`**: whether the memory holds both classes. It
+answers in one boolean the question that cost this project weeks — *can a model be validated
+against what we have?* — and a memory of half a million observations with every lesson on the
+same side of zero answers `false`, however healthy every other panel looks.
+
+> **Cold start is not "solved" by this phase — it is now *possible* to solve.** The loop is
+> closed and the plumbing is proven end-to-end in tests, but the platform still needs to
+> actually open and close trades to accumulate both classes. Generating those first positives
+> without asking the committee to decide before it can know is **Phase 2**, and it should not
+> be confused with recalibrating thresholds.
+
+---
+
+## 6n. Research as the platform's knowledge producer (Phase 2, 2026-07-28)
+
+Phase 1 gave Hades a memory. Phase 2 makes the Research Lab fill it — **both** labs: the
+internal `contexts/research`, and the external `HadesResearchLab` repository that had never
+been able to hand anything over at all.
+
+### Internal: research → knowledge, entirely over the bus
+
+Every finished study now lands in permanent memory: experiments, backtests, walk-forward,
+Monte Carlo, replays, feature proposals, reports, model and strategy comparisons, and — the
+part that used to be missing — the lab's own **conclusions**. The memory held the experiments
+but not what the lab decided about them, which is like keeping the lab notebook and throwing
+away the paper.
+
+The connection is **nothing but domain events**. Research does not import Knowledge; Knowledge
+does not import Research; `tests/test_research_isolation.py` now enforces both directions.
+That is not stylistic:
+
+- a direct call would put an ingestion failure on the lab's critical path, so a memory outage
+  would start failing research runs;
+- it would hand a context that must never act a live handle on a collaborator that writes.
+
+The lab's existing prohibition stands untouched and still AST-verified: **no import of
+`execution`, `risk` or `portfolio`.**
+
+**Everything the lab produces is `SIMULATED`, never `REALISED`.** A study is true about a
+model; only the platform settling a trade it actually took produces ground truth. Pinned by
+`test_research_knowledge_is_never_ground_truth` and `test_the_lab_produces_no_lessons`.
+
+### Two dead components, now alive
+
+- **The Replay Engine** shipped in Phase 9 with **no caller anywhere**, and `ReplayCompleted`
+  was registered on the bus and never published. A study nobody can run produces no knowledge.
+  `ResearchManager.run_replay()` now exists and publishes.
+- **`ReplayCompleted`, `StrategyCompared`, `ModelCompared`, `PromotionRejected`** and the
+  promotion decision were all published-or-registered but unrecorded. All absorbed now.
+
+### The event-name collision — a real defect, found by Phase 1's drift guard
+
+`contexts/research` and `contexts/strategy` both defined a class called `StrategyPromoted`.
+**The bus routes on the class name**, so they collided on one key and `EventRegistry` kept
+whichever was registered last. Under the Redis transport a *research* promotion — the most
+governance-sensitive event the lab emits — was rebuilt as a strategy-engine promotion with a
+different payload schema, and `AuditSubscriber` labelled it `strategy_promoted`. Nothing
+raised; a `dict` accepted the second registration silently.
+
+The research event is now `ResearchStrategyPromoted`, and
+`test_no_two_registered_events_share_a_routing_key` walks every `domain/events.py` in the
+codebase so the next collision fails at the moment the class is written.
+
+### External: the knowledge bridge
+
+`hades.knowledge/v1` — a checksummed JSON bundle the lab writes to a directory **it owns**,
+an operator moves into the Core's inbox, and `POST /api/v1/knowledge/import` sweeps. No shared
+library, no shared schema, no network call, and neither repository imports the other. It is a
+**pull**: with nobody sweeping, a bundle on disk does nothing.
+
+The lab side is `hades_research.knowledge_export`, new in that repository. It has no setting
+that could point at Hades Core — a test asserts that — so `HRL_ALLOW_CORE_WRITE=false` stays
+a property of the code rather than of an operator's restraint.
+
+**What a file is not trusted to say.** Knowledge feeds the AI Committee's training ledger, so
+an inbox that believed its input would be a way to train the platform on whatever an external
+process asserted. Three structural limits:
+
+1. **A bundle cannot declare its verification.** The field does not exist; declaring it is a
+   rejection, not an ignored key. The Core derives the level from `source`, and every source
+   an external producer may claim maps to `simulated`.
+2. **A bundle cannot claim a platform source.** `paper_trading`, `executed_trade`, `scanner`,
+   `security`, `committee` are refused by allowlist, so a file cannot pose as the platform
+   observing itself.
+3. **A bundle cannot express a *lesson*.** Lessons are the only thing the committee trains on,
+   and they are minted exclusively by the Decision Journal settling a real trade.
+
+Together: the worst a hostile or buggy bundle achieves is inserting clearly-labelled simulated
+observations. It cannot reach the ledger the brain learns from.
+
+The contract fixture is **generated by the lab's actual exporter** and committed
+byte-identically in both repositories, so drift on either side fails a build. (The candidate
+bridge's fixtures are hand-written and its docs claimed otherwise — that lesson is why this
+one is generated. See [`docs/RESEARCH_LAB_BRIDGE.md`](docs/RESEARCH_LAB_BRIDGE.md).)
+
+Every processed file is moved to `accepted/` or `rejected/`, timestamped, with the reason
+logged — a filesystem audit trail readable months later by someone without this codebase.
+
+> **What Phase 2 does not claim.** The lab can now hand over findings, and the memory records
+> them honestly as simulations. It still cannot hand over a *model*: the candidate bridge
+> remains one-sided and incompatible on format, model family and feature space, and that is a
+> product decision (audit §7.4), not an implementation gap.
+
+---
+
+## 6o. The Candidate Enricher — no token is ever judged from scratch (Phase 3, 2026-07-28)
+
+Phase 1 gave Hades a memory. Phase 2 filled it. Phase 3 makes the brain **read** it.
+
+Until now the decision path never touched permanent memory. Every token arrived at the AI
+Committee as though the platform had never seen a token before: the specialists read a feature
+vector, the meta-model fused their opinions from a fixed bias, and everything Hades had lived
+through — every settled trade, every developer it had learned to distrust, every narrative that
+had never once worked — was absent from the calculation. The knowledge existed and *nothing
+consulted it*.
+
+That is the exact shape of defect the last audit kept finding: a component that is present,
+correct and unwired. It is also why the cold start looked like a threshold problem. It was
+not. The committee was not being too strict; it was being asked to judge in ignorance.
+
+### The rule
+
+**No candidate reaches the AI Committee unenriched**, and this is enforced structurally rather
+than by convention:
+
+```
+intelligence ─WalletIntelligenceComputed─► [context builder → CANDIDATE ENRICHER → committee]
+```
+
+`CommitteeManager.evaluate()` accepts one type — `EnrichedCandidate` — and there is no
+overload, no optional argument and no default that takes a bare `DecisionContext`. A caller
+that skipped the enricher cannot express the call. `CommitteeHandler` takes the enricher as a
+required constructor argument, so there is no path through the subscriber either. Both are
+pinned by tests.
+
+### The eleven dimensions
+
+For each candidate the Decision Context Builder establishes a `CandidateIdentity` — the cohort
+keys the memory is indexed by — from reads it already performs (the security assessment's
+per-analyzer facts, the wallet-intelligence snapshot, the token's metadata row). The enricher
+then asks the Knowledge Engine what happened last time, along **eleven** dimensions:
+
+| Dimension | Cohort | Basis |
+|---|---|---|
+| **developer** | settled trades tagged with this deployer | outcomes |
+| **wallets** | how much of this token's wallet crowd the memory already knows, and how it rates them | observations |
+| **clusters** | settled trades tagged with this dominant cluster | outcomes |
+| **narrative** | settled trades telling the same meme story | outcomes |
+| **launchpad** | settled trades from the same listing venue | outcomes |
+| **liquidity** | settled trades taken in a comparable depth band (log space) | outcomes |
+| **volatility** | settled trades taken in a comparable volatility band | outcomes |
+| **outcomes** | this exact token's own settled history | outcomes |
+| **strategies** | the record of the strategy behind comparable decisions | outcomes |
+| **holders** | settled trades on a similar holder structure | outcomes |
+| **patterns** | the *k* nearest past decisions in the models' own normalised space | outcomes |
+
+All eleven are always reported, including as "nothing recorded yet" — a dimension that
+silently disappears is one nobody notices is missing. The **patterns** dimension is the one
+that answers *"have we been here before?"* for a brand-new developer on a brand-new venue
+telling a story nobody has told; it needs no shared tag at all.
+
+`narrative` is classified by a transparent keyword map, never a model: a label that drifts
+would silently repartition every historical cohort, so today's candidates would be compared
+against a differently-defined past. Nothing matches ⇒ `None`. **A wrong cohort is worse than a
+missing one**, because nothing downstream can ever detect it.
+
+### How knowledge reaches the verdict — and how far it is allowed to
+
+Four rules, each present because the obvious implementation is dangerous:
+
+1. **An empty memory is exactly neutral.** With no evidence every prior has `strength` 0, the
+   fused `prior_log_odds` is `0.0`, and the committee produces bit-for-bit the number it
+   produced before this phase existed. There is a test that pins precisely that. Enrichment can
+   only ever be the platform *using* what it knows; it is structurally incapable of being a
+   disguised recalibration. **No threshold was lowered in this phase.**
+2. **Evidence is shrunk toward ignorance.** Every cohort rate is pulled toward 0.5 by a
+   pseudo-count, and a cohort below `min_cohort` is *reported but silent*. Two winning trades
+   are an anecdote; they must not move a probability.
+3. **The nudge is bounded** (`LEARNING_ENRICHMENT_MAX_PRIOR_LOG_ODDS`, default 1.0 logit). The
+   prior enters as an additive term on the meta-model's logit — the only place a prior belongs
+   in a logistic model: it shifts the starting point and distorts no specialist's
+   contribution. On the stop-loss head it enters **negated**, because that head's weights are
+   negative and one sign for all three would have made encouraging history argue that a token
+   is *more* likely to stop out.
+4. **Consulted-and-empty is a recorded state.** `evidence_available=False` is distinct from
+   "never enriched", and the metrics separate three outcomes — `found` / `empty` /
+   `unavailable`. A young platform and a broken one looked identical for weeks; that is the
+   single most expensive thing about the last audit and it does not recur here.
+
+Two further effects, both fixing an existing dishonesty:
+
+- **`sample_support` finally answers its own question.** The Confidence Engine documents that
+  factor as *"how many similar historical examples exist"*; it was a number read from
+  configuration. It is now measured per candidate from ground-truth cohorts (observations do
+  not count — an opinion about a wallet is not a result from one).
+- **History is stated, not just applied.** Every explanation carries the cohorts behind the
+  prior, or the caveat *"no comparable history yet — judged on present evidence alone"*. A
+  prior that moves a number without appearing in the account of why is the black box this
+  context refuses to be.
+
+The enrichment is persisted **with** the prediction (`CommitteePrediction.enrichment`): a
+verdict is only auditable next to the memory that informed it.
+
+### The loop closes on itself
+
+The enricher matches cohorts on the **tags of settled lessons** — so a lesson recorded without
+cohort keys is a trade the platform paid for and can only ever learn from in isolation. The
+approval event carries none of them (the Risk Manager knows a candidate, not its provenance),
+but the committee does, and it publishes them on the prediction that immediately precedes the
+approval. The Knowledge runtime now remembers that identity and merges it into the decision's
+tags, with the approval's own attribution winning where the two overlap. Today's enrichment is
+what makes tomorrow's possible.
+
+### Architecture
+
+- **The dependency is a narrow read port the Learning context declares itself**
+  (`CandidateHistoryPort`), satisfied by one adapter at Learning's edge
+  (`KnowledgeCandidateHistory`) that touches only Knowledge's **domain** layer. Knowledge
+  still imports nothing; the arrow points Learning → Knowledge and there is no cycle. The
+  enricher itself is pure and is tested with a handful of lessons and no database.
+- **Cost is bounded by design.** The lesson set is cached with a TTL and lessons are
+  normalised once per refresh, not once per candidate: enrichment runs on the Scanner's hot
+  path, and re-reading the ledger per token would tie the brain's throughput to the ledger's
+  size — gradually, months from now.
+- **Failure degrades, never blocks.** An unreachable memory yields a neutral, clearly-labelled
+  "could not ask" enrichment; the token is still judged. The enricher takes no decision, sizes
+  nothing and cannot reject a candidate.
+
+> **What Phase 3 does not claim.** The enricher makes the platform *use* what it has learned;
+> it does not create knowledge. On a memory with no settled lessons it is exactly neutral by
+> construction, so the first trades still have to come from somewhere — that is the deliberate
+> bootstrap policy (audit Phase 2), still open, and still not the same thing as recalibrating
+> thresholds.
+
+---
+
+## 6p. Exploration Mode — buying the first evidence, on a budget (Phase 4, 2026-07-29)
+
+Phase 1 gave Hades a memory. Phase 2 filled it with research. Phase 3 made the brain read it.
+All three left the same hole open, and §6o named it explicitly: *the enricher makes the
+platform use what it has learned; it does not create knowledge.* On a memory with no settled
+lessons the enrichment is exactly neutral, so the first trades still have to come from
+somewhere.
+
+Phase 4 is where they come from.
+
+### The deadlock, stated precisely
+
+The defect is structural, not numeric:
+
+```
+the committee is validated against settled trades
+    -> trades happen only when the committee is confident
+        -> with an empty memory it is confident about nothing
+            -> nothing trades -> the memory stays empty
+```
+
+There is an obvious way out and it is the wrong one. Lowering `RISK_MIN_PROB_ROI_POSITIVE`
+breaks the loop by lowering the bar for **all** capital, permanently, on the strength of no
+evidence at all — which is precisely the decision the evidence was supposed to inform. It also
+hides itself: the platform starts trading, the dashboards fill, and nothing distinguishes a
+system that learned something from one that merely stopped being careful.
+
+Exploration breaks it the other way. It buys a **bounded, budgeted, self-terminating** number
+of deliberately tiny samples, keeps every safety rule intact, and turns itself off the moment
+the memory can answer the question on its own.
+
+### What it is allowed to do, and what it is not
+
+A candidate may be traded under exploration rules only when **all** of these hold:
+
+| Condition | Enforced by |
+|---|---|
+| the memory demonstrably lacks the evidence to decide | `EvidenceStatus.sufficient` — checked before anything can spend |
+| the candidate is uncertain, not bad — `P(ROI+)` inside an explicit band | `ExplorationPolicy`, floor **and** ceiling |
+| at least one of its cohorts is under-sampled | deterministic least-known-cohort rule |
+| the daily / weekly / lifetime budgets all have room for one fixed-size trade | four independent ceilings over an append-only ledger |
+| **every safety rule passes, unchanged** | the Risk Manager's safety tuple |
+| **every allocation rule passes, unchanged** | the Risk Manager's allocation tuple |
+
+The last two are the point. An exploration grant waives **exactly one named policy**, and only
+ever from the *conviction* tuple:
+
+```
+GLOBAL GATES      kill switch - circuit breaker - emergency       -- never waivable
+SAFETY            security - developer - wallet - liquidity       -- never waivable
+CONVICTION        min_probability - min_confidence                -- the only waivable pair
+SIZING            fixed exploration sample, not conviction-weighted
+ALLOCATION        positions - capital - drawdown - exposure -
+                  correlation - risk budget - trade rate          -- never waivable
+```
+
+That split is the security boundary of the whole programme, so it is a property of the
+composition root rather than of anybody's discipline. `build_risk_manager` builds two tuples;
+the manager consults only `_conviction` when deciding what a grant may cover. **A rule added to
+the safety tuple next year is protected by default**, without whoever adds it having to know
+exploration exists. `test_exploration_isolation` asserts the membership of both tuples by
+name, because moving `SecurityPolicy` across is a one-line edit that would compile, pass every
+other test, and let the programme buy rug pulls a dollar at a time.
+
+### Risk Manager still the only authoriser; Execution still only an executor
+
+Nothing about the two invariants changed. `TradeApproved` is still constructed in exactly one
+place. The exploration context has **no** method that approves anything: the strongest thing it
+returns is an *eligibility* verdict with a dollar ceiling on it, expressed in the Risk
+Manager's own vocabulary (`ExplorationGrant`) through a port the Risk Manager declares. There
+is a test that `ExplorationGrant` has no `approved`/`decision`/`execute` field, because that
+addition would look, in review, like one more field on a value object.
+
+The Execution Engine was not touched at all. It receives a `TradeApproved` carrying one extra
+boolean and treats it exactly as it treats every other approval.
+
+### No magic heuristics, no black box, no AI operating anything
+
+The textbook answers here — ε-greedy, Thompson sampling, UCB — all decide *how often* to
+explore and leave *which candidate* opaque. That is the wrong trade for a context whose entire
+output is evidence. The frequency is already pinned down by an explicit budget, so what remains
+is a selection rule, and the one used is the simplest defensible thing: **take the candidate
+whose cohort the memory knows least about**, ties broken by key name so two workers justify the
+same candidate identically.
+
+There is **no randomness anywhere in the decision** — a test asserts that twenty-five
+evaluations of the same inputs produce the same verdict — and **no model**. Every verdict
+carries the arithmetic that produced it: which condition was checked, what the numbers were,
+what tipped it. A person with the evidence census, the spend and the candidate can recompute
+the answer on paper. No AI operates: the committee still only quantifies, and its output is an
+*input* to a rule written in Python that anybody can read.
+
+### Auto-shutdown is a latch, not a query
+
+The programme ends by itself, on a stated condition:
+
+```
+lessons   >= EXPLORATION_TARGET_LESSONS
+positive  >= EXPLORATION_TARGET_PER_CLASS
+negative  >= EXPLORATION_TARGET_PER_CLASS
+```
+
+The two class conditions are **not** redundant with the total, and that is the whole lesson of
+the last three phases: sixty settled trades all on one side of zero are a single-class dataset,
+whose AUC is undefined and against which no validation gate can ever pass. A programme that
+stopped on the count alone would stop having achieved nothing.
+
+Once sufficiency is observed the service **latches** off, publishes `ExplorationCompleted`, and
+short-circuits every later candidate without touching the memory again. Lessons are
+append-only so sufficiency cannot genuinely be lost — but a transient read that undercounted
+them would otherwise restart a programme the platform had already declared finished, spending
+budget again with no announcement that it had. The latch makes "exploration ended" a fact with
+a timestamp rather than a condition that happens to hold. There is no configuration in which
+this programme runs forever, and no operator action is needed for it to end.
+
+Only settled lessons count. Not observations, not the Research Lab's backtests however
+numerous: the premise is that the platform lacks **ground truth**, and a simulation is a true
+statement about a model, not about the market. Letting simulations count would let the lab talk
+the platform out of gathering the one kind of evidence it cannot produce.
+
+### An independent budget, derived from an append-only ledger
+
+Four ceilings, independent on purpose — a daily cap alone permits an unbounded total given
+enough days, and a lifetime cap alone permits the whole budget to burn in one afternoon:
+
+```
+per trade   $1.00   fixed, NOT conviction-weighted
+per day    $10.00   (and <= 10 trades)
+per week   $40.00   (and <= 40 trades)
+lifetime  $250.00   -- never resets
+```
+
+Because the size is fixed, the lifetime budget states **exactly how many samples the programme
+can ever buy** (250 with these defaults). A size that grew with conviction would reintroduce,
+at the sizing step and invisibly, the very belief the programme exists to test.
+
+Spend is always **aggregated from the `exploration_grants` table**, never accumulated in a
+process variable. That is correctness, not style: an in-memory total resets on restart, which
+would silently re-authorise the day's budget on every deploy and present weeks later as an
+overspend with nothing in the logs to explain it. A test rebuilds the service over the same
+ledger and asserts it reaches the same conclusion.
+
+The budget is charged **on approval, not on grant**. A candidate that clears exploration and is
+then vetoed by an allocation rule costs the programme nothing — fixed by a test, because a
+budget that charged on grant would overstate its burn and understate its remaining runway.
+
+### Every trade feeds the Knowledge Engine — and is labelled as exploration
+
+Exploration trades travel the ordinary decision pipeline, so the Phase-1 loop picks them up
+with no special casing: `FeaturesComputed` → `TradeApproved` (evidence frozen) →
+`PositionOpened` → `PositionClosed` → `Lesson`. That is the entire point of the programme.
+
+One thing was added: `TradeApproved` now carries `exploration: bool`, and the Knowledge runtime
+turns it into an `exploration=true` tag on the settled lesson. Without it the memory would hold
+the trade but not the fact that a budget bought it, and no later analysis could separate what
+the platform *learned* from what it *believed* — a programme of deliberate dollar-sized samples
+would be indistinguishable, in the training ledger and in every performance figure derived from
+it, from a strategy that simply lost small a lot. For the same reason the programme's own
+events (`ExplorationGranted` / `Spent` / `BudgetExhausted` / `Completed`) are recorded under a
+new `exploration` knowledge source, kept apart from `paper_trading`, and the Risk Manager
+counts exploration approvals in their own metric and their own snapshot field.
+
+### Architecture respected
+
+- **DDD** — a bounded context with its own vocabulary (`domain` / `application` /
+  `infrastructure`). It names no order, no position, no balance and no trading mode, and a
+  vocabulary test forbids it acquiring one.
+- **Isolation, verified by AST, as an allowlist** — Exploration may import the shared kernel
+  and, *from its infrastructure edge only*, Knowledge's **domain**. Execution, risk, portfolio,
+  learning and strategy are all unreachable. The allowlist covers the context somebody adds
+  next year without them remembering this file exists.
+- **Clean Architecture / SOLID** — two narrow ports it declares itself (`EvidencePort`,
+  `ExplorationLedgerStore`), each with a Postgres adapter and an in-memory twin exercised by
+  the same tests. The policy is pure: no I/O, no state, no clock of its own.
+- **Direction of dependency** — Risk → Exploration → Knowledge. No cycles. Exploration holds no
+  reference to the guardian and cannot call it back, which is what keeps "the Risk Manager is
+  the only authoriser" true in the presence of a collaborator that exists to argue for trades.
+- **Event Sourcing** — the ledger is append-only; the port has no `update`, no `delete` and no
+  `clear`, not even on the in-memory twin (a twin that could erase spend is a way to write a
+  test proving a property the real system does not have).
+
+### Operating it
+
+Off by default, and it stays off until an operator sets a budget they are content to lose —
+these trades are chosen for what they will teach, not for their expected return. All knobs are
+`EXPLORATION_*` in `.env.example`. `GET /api/v1/exploration/status` is the page to read: the
+two fields that matter are `active` and `inactive_reason`, because "finished", "out of money"
+and "switched off" are three very different states that a single boolean would collapse.
+`GET /api/v1/exploration/grants` returns the ledger itself, each row carrying the cohort that
+justified it — which is what makes the programme auditable on its own terms: did the budget
+actually spread across the cohorts the memory was missing, or pour into one developer because
+the Scanner kept finding them?
+
+New table `exploration_grants` (migration `0011_exploration_ledger`). Metrics:
+`hades_exploration_active`, `hades_exploration_budget_total_remaining_usd`,
+`hades_exploration_evidence_lessons`, and `hades_exploration_declined_total{reason}` — a single
+undifferentiated decline counter could not distinguish "today's allowance is spent", which
+fixes itself overnight, from "every candidate falls outside the band", which means the band is
+misconfigured and no amount of waiting will produce a trade.
+
+> **What Phase 4 does not claim.** It does not claim the platform will *reach* sufficiency —
+> only that it can now try, at a price fixed in advance, without risking the main capital and
+> without anyone having to remember to stop it. A programme that spends its lifetime budget
+> without reaching both classes ends with `ExplorationBudgetExhausted{window=total}` and a
+> warning to the operator; that is a real outcome, it is announced rather than hidden, and the
+> answer to it is a judgement about the platform, not a bigger budget applied quietly.
+
+---
+
+## 6o. Two decisions, resolved (2026-07-29)
+
+The audit left two questions open for three sessions. Both are now answered in code.
+
+### The Strategy Engine decides — `gate_risk` reads as something
+
+Fifteen strategies, a weighted ensemble, a dynamic weight engine and a shadow lifecycle all
+published `EnsembleSignalGenerated`, and **no subscriber existed anywhere**. It was the
+largest piece of dead machinery in the codebase, and `gate_risk` was a flag read only for
+logs.
+
+`gate_risk` is now the single switch that gives the ensemble two powers:
+
+* **Veto an entry** — `EnsembleConsensusPolicy`, appended to the Risk Manager's CONVICTION
+  tier. If the roster's consensus is not BUY, or its conviction is below
+  `STRATEGY_GATE_MIN_ENSEMBLE_SCORE`, the candidate is rejected as `ENSEMBLE_DISAGREES`.
+* **Request an exit** — a SELL/EXIT consensus on a token already held becomes an exit request
+  the Position Monitor honours on its next priced tick. Those verdicts used to die in the
+  ensemble; the only way out of a position was the TP/SL envelope approved at entry.
+
+**Both directions only ever reduce exposure.** The ensemble cannot create an approval, cannot
+open a position and cannot size anything; `TradeApproved` is still constructed in exactly one
+place. A second voice that could *approve* would end "the Risk Manager is the sole
+authoriser" — one that can only refuse is strictly conservative, and with the gate on the set
+of approved trades can only shrink.
+
+Three design points that are load-bearing rather than stylistic:
+
+1. **A silent roster is not a dissenting one.** With `ensemble_participating == 0` the policy
+   passes. At cold start no strategy has an opinion about anything, and reading silence as a
+   veto would halt the platform while attaching a perfectly sensible reason to every
+   rejection.
+2. **CONVICTION, not SAFETY.** An exploration grant may waive it. Exploration exists to
+   sample cohorts the platform has no evidence about, and strategies with no history have no
+   opinion worth letting block that. It could never waive a SAFETY rule, and a strategy
+   verdict is not one.
+3. **The stop-loss still wins.** When a strategy exit and a breached stop fire on the same
+   tick, the stop is the reason of record — it is the loss the trade was sized around, and a
+   strategy silently relabelling it would corrupt every statistic about how the platform
+   loses money.
+
+The verdict travels the same way every other upstream fact does: `EventDrivenRiskFacts`
+subscribes to the event, the `RiskContextBuilder` puts it on the candidate. No new I/O.
+
+### The model bridge — option O1
+
+The lab may now export a **deployable model**, and only one kind: a transparent logistic
+weight set over Core's own `FeatureCatalog`.
+
+`hades_research.candidate_export` refuses a tree ensemble **by type**, not by convention —
+and the fakes in its test suite deliberately carry a `coef_`, because duck-typing would let
+them through and produce a bundle that is confidently wrong. The refusal message says what to
+do instead, since a dead end with no exit is how people route around a rule: keep the tree in
+the lab as a *hypothesis generator* and export its finding as knowledge.
+
+The subtle constraint is the feature names. A coefficient keyed by a name Core does not
+produce indexes nothing — the model would load, score every token with that input treated as
+neutral, and be a quietly different model from the one that was validated. Nothing would
+raise. So names are checked against Core's catalogue (mirrored, not imported: importing would
+couple the two release cycles and undo the file-based bridge) and an unknown one is a
+rejection at export time.
+
+**The candidate fixtures are now generated by that exporter** and committed byte-identically
+in both repositories. They used to be hand-written to the contract while the docs claimed
+otherwise — that gap is closed, and it is documented in
+[`docs/RESEARCH_LAB_BRIDGE.md`](docs/RESEARCH_LAB_BRIDGE.md).
+
+---
+
+## 6p. The exit latch that never cleared (2026-07-30)
+
+Found live, in production, on a position that had been open three days. It is the
+platform's own founding symptom — *"the dashboard looks healthy and the balance never
+moves"* — and this was the last mechanism still producing it.
+
+The evidence, gathered in order: the Position Monitor **had** resumed the position after the
+restart; the price oracle **did** quote the token (0.001877 against an entry of 0.0021916575,
+about 14% under water); `PositionUpdated` events **had** been published, 102 of them; and the
+book reported `unrealized_pnl_usd = 0.0` with equity pinned at exactly 1000.0. No exception,
+no error log, nine healthy containers.
+
+**The mechanism.** `PositionMonitor._exit()` latches `exiting = True` before submitting the
+SELL, so a slow fill cannot be double-sold. It cleared that latch in an `except` block. But
+`ExecutionEngine.execute()` is deliberately **fail-soft**: a rejected or failed order comes
+back as a `FillReport` with `filled=False` and is announced as `OrderFailed` — it does not
+raise. The un-latch path was therefore unreachable for the ordinary failure.
+
+A latched position is filtered out of every subsequent tick
+(`[p for p in self._positions.values() if not p.exiting]`). So one failed exit meant:
+
+* it was never marked again — unrealised PnL frozen at its last value, and the equity curve
+  simply stopped moving;
+* its stop-loss could never fire again — the loss the trade was sized around became
+  unreachable;
+* no `PositionClosed` ever arrived, so it was never removed, and its notional stayed
+  committed against every exposure limit indefinitely;
+* and **nothing said so**. This is the exact family the audit was written about: a component
+  that presents as operational while doing nothing.
+
+**The fix is two-layered.** `_exit()` now inspects the returned fill and un-latches on
+anything that is not a fill, logging `position_exit_not_filled` so the retry is visible.
+And, independently of *why* a latch might stick, `_release_stuck_latches()` runs each tick
+and force-releases any latch older than `exit_latch_timeout_seconds` (default 120) with an
+error. The specific bug is fixed; the failure mode it produced is severe enough that it
+should not depend on one code path staying correct.
+
+The latch keeps its original job: a successful exit stays latched, and a test asserts a
+second tick does not sell the same position twice.
+
+Every regression test here was run against the reintroduced bug and confirmed to **fail**
+without the fix. A test for a silent defect that passes either way is worse than no test,
+and this defect was silent by construction.
+
+---
+
+## 6q. The consumer that fell 59 hours behind (2026-07-30)
+
+The portfolio's frozen unrealised PnL turned out to be a *symptom*, and the disease was worse
+than the symptom suggested.
+
+Measured live on the worker's consumer group:
+
+```
+group      pending   entries-read   lag
+worker         765         68,745    103,357   ← 59 hours behind
+watchdog       118        137,425     34,677
+engine           2        172,102          0
+```
+
+The stream held **172,122 entries** and **155 MB** of Redis, with no `MAXLEN` anywhere and no
+`maxmemory` configured.
+
+**What that meant.** The worker hosts the Scanner, Security, Intelligence, Committee, Strategy,
+Risk, Execution, Research, Knowledge and Exploration runtimes. A worker 59 hours behind is a
+platform whose *entire decision path* is judging tokens from two days earlier. The portfolio's
+`unrealized_pnl_usd` sat at exactly `0.0` simply because the `PositionUpdated` events published
+minutes earlier were still 103,357 entries away in its queue. Knowledge's growing observation
+count was not current activity either — it was a backlog draining slowly.
+
+And **nothing measured it.** Every container reported healthy, every log line was ordinary, and
+the only evidence was a number in `XINFO GROUPS` that nobody was reading. A local repro of the
+exact persisted production state proved the portfolio's own logic was correct all along: restore
+the snapshot, publish the event, and the PnL applies.
+
+**Two fixes, both about visibility as much as capacity:**
+
+1. **The stream is bounded.** `XADD` now carries `MAXLEN ~ EVENT_BUS_STREAM_MAX_LEN`. Approximate
+   trimming lets Redis drop whole radix nodes, so the cost per publish is negligible, and the cap
+   sits far above any consumer's working set so a briefly-behind consumer is never trimmed out
+   from under it.
+2. **The consumer watches itself.** Once per `EVENT_BUS_LAG_CHECK_INTERVAL_SECONDS` the bus reads
+   its own group's lag and logs an **error** above `EVENT_BUS_LAG_WARN_THRESHOLD`. One `XINFO`
+   per interval, and any failure is swallowed — observability must never be able to stall the bus
+   it observes.
+3. **Orphaned messages are reclaimed.** A group's pending list is *per consumer*, and the
+   consumer name is the process's instance id, so a container killed mid-dispatch leaves its
+   in-flight messages assigned to a name that will never ack them. Nothing redelivers those on
+   its own: `XREADGROUP >` returns only new entries. The live deployment had accumulated **765**
+   such orphans across restarts — published, still in the stream, never handled. `XAUTOCLAIM`
+   now takes over anything idle beyond `EVENT_BUS_RECLAIM_AFTER_SECONDS`, dispatches it through
+   the normal handlers and acks it. Handlers have always been required to be idempotent (the bus
+   is at-least-once), so a reclaim that duplicates work is safe by contract.
+
+> The lesson is the one this whole audit keeps producing: the defect was not that a component
+> was slow. It was that being hours behind looked exactly like being healthy.
+
+---
+
+## 6r. The consumer that was not behind — it was gone (2026-08-03)
+
+§6q bounded the stream and taught the consumer to report its own lag. Four days later the
+platform had stopped trading entirely, and the reason was that §6q had measured the wrong
+failure. The Worker was not behind. It had stopped reading altogether, and a loop that is not
+running reports no lag at all.
+
+Measured live, with the stream being written to at that same moment:
+
+```
+group          pending   last-delivered      consumer idle
+worker             823   1785420780748-0     349,704,437 ms  ← 97 hours
+watchdog           118   1785419313328-0      ~97 hours
+engine              21   1785576872235-0      ~55 hours
+notification         4   1785491855026-0      ~78 hours
+scheduler           10   1785491855026-0      ~78 hours
+```
+
+`GET /api/v1/funnel?hours=24` returned **zero at every one of its nine stages**, and its
+diagnosis blamed the Scanner — while the Scanner was in fact publishing normally, its
+`PoolDiscovered` events landing in a stream whose `last-generated-id` was the current
+millisecond. Nine containers healthy, four days, not one trade.
+
+**The mechanism, and why nothing said anything.** `RedisEventBus.run()` guarded only the
+`xreadgroup` call. Anything raised further down the cycle — rebuilding an envelope into a
+typed event, an `XACK` on a dropped connection — escaped the `while` and returned from
+`run()`. And the task could not report itself either: `ServiceProcess` holds every task in
+`self._tasks`, and asyncio's "Task exception was never retrieved" warning is emitted from the
+task's `__del__`, so a task that is still referenced is never collected and the warning never
+fires. The single log line `redis_bus_consuming` at 15:03:13 on 2026-07-30 was the last thing
+the bus ever said.
+
+Every existing probe passed the whole time, and passed *truthfully*: Postgres answered, Redis
+pinged, the API served `/health`, the liveness files were fresh. The Worker process really was
+alive. Liveness is touched by a service's **main** coroutine — it has never had anything to
+say about whether that service's consumer turns.
+
+**Three changes, each closing one step of that chain:**
+
+1. **Nothing inside the loop may end it.** The read/dispatch/ack cycle moved into
+   `_consume_once()`, and `run()` wraps the whole call — not one line of it — in a guard that
+   logs `redis_bus_cycle_failed` with a traceback and keeps turning. `CancelledError` is
+   re-raised, so shutdown is still the only way out. A message that cannot be rebuilt is now
+   caught in `_dispatch` too, so a poison envelope costs one error line instead of wedging the
+   group behind it.
+2. **No background task dies quietly.** `ServiceProcess._spawn()` replaces the bare
+   `create_task` everywhere and attaches a completion callback. These loops are meant to run
+   until shutdown, so a task that ends before then is a defect by definition: it is logged as
+   `background_task_crashed` with its traceback, or `background_task_exited` if it merely
+   returned.
+3. **A dead consumer can no longer look healthy.** `EventBusConsumerProbe` reads each group's
+   consumer `idle` from Redis and fails the Watchdog above `WATCHDOG_EVENT_BUS_MAX_IDLE_SECONDS`
+   (default 300). Redis is the right place to ask: the answer is the same across processes and
+   does not depend on a service's own opinion of itself. One group stalled condemns the probe —
+   a healthy Engine does not cover for an absent Worker, because the Worker is where the whole
+   decision path lives.
+
+**The trigger, caught in the act.** Mid-session the platform was redeployed and the consumers
+came back — `engine`, `notification` and `scheduler` reached `lag 0`. The Worker consumed for
+about six minutes and **died again**, silently, exactly as before. Its consumer `idle` climbed
+in step with the wall clock while its `pending` stayed frozen at 621, and its last log line was
+once more `redis_bus_consuming`, with a single guarded `redis_bus_read_failed` warning before
+the silence.
+
+Six minutes is `EVENT_BUS_RECLAIM_AFTER_SECONDS`. The first reclaim cycle was the thing that
+killed it, and the reason is the interaction between the two fixes in §6q:
+
+* the stream is now capped by `MAXLEN`, so entries are trimmed away on a schedule of their own;
+* a message left unacked when the cap moves past it stays in the **pending list** pointing at a
+  message that no longer exists. Measured live: the Worker's pending ids started at
+  `1785119381359-0`, older than the stream's own `recorded-first-entry-id`;
+* `XAUTOCLAIM` hands those back with **empty fields**, and `_dispatch` began with
+  `fields.get("type", "")`.
+
+So the orphan reclaim added to heal §6q's 765 stranded messages became a *new* way to stop the
+Worker consuming, minutes after every restart — a fix whose failure mode was the same silence
+it was written to end. `_reclaim_stale` now skips a claimed entry with no fields and acks it, so
+it leaves the pending list instead of being reclaimed forever, and the outer guard means even an
+unforeseen version of this cannot end the loop again.
+
+> §6q's lesson was that being hours behind looked exactly like being healthy. This one is
+> sharper: *not running at all* looked exactly like being healthy, and it did so because the
+> only thing measuring the consumer was the consumer. That is also why the follow-up fix could
+> reintroduce the outage without anyone noticing — there was no independent witness, so each
+> repair was graded by the component it repaired.
+
+---
+
+## 6s. Three surfaces that reported nothing wrong (2026-08-03)
+
+Follow-ups from the same audit as §6r, each an instance of a pattern the log keeps producing:
+a component that is *silent* being mistaken for a component that is *fine*.
+
+### The funnel blamed the producer
+
+`GET /api/v1/funnel?hours=24` returned zero at all nine stages and said *"Nothing was
+discovered in this window — the Scanner's sources are the place to look."* The Scanner was
+publishing normally. Every counter the funnel reads is written by a handler on the far side of
+the event bus, so a stopped consumer empties the funnel **from the top** and is indistinguishable
+from a Scanner that found nothing — and the platform spent four days being told to check its
+sources.
+
+The diagnosis now rules out the bus before naming a producer: when `discovered == 0` it asks
+Redis which consumer groups have stopped reading, and says so. It only asks in that one case,
+so the endpoint stays cheap enough to poll, and the check is advisory — a diagnosis that cannot
+be computed must never break the endpoint carrying it. `_diagnose` stays a pure function over
+counters, with the group list passed in, so it remains directly testable.
+
+### The Health screen was the one screen that never refreshed
+
+`HealthScreen.tsx` fetched once on mount and swallowed the failure —
+`api.health().then(setHealth).catch(() => undefined)` with an empty dependency array. A failed
+call left the panel on "Loading…" for the rest of the session; a successful one left the
+operator reading a snapshot from page load no matter what happened afterwards. Every other
+screen already polled; this was the outlier, and it was the screen whose entire job is to say
+that something is wrong. It now polls on the shared 10s cadence, tracks reachability
+separately from data, timestamps what it is showing, and says plainly that an unreachable API
+is itself a fault.
+
+### `dedup_key` was a field nobody read
+
+`NotificationRequested` has carried a `dedup_key` since it was defined, and nothing anywhere
+consumed it — the same shape as `WATCHDOG_UNHEALTHY_AFTER_MISSED_BEATS` before §6k and the
+`SCORING_*` thresholds before `6008192`: a name that promises a behaviour the code never had.
+Meanwhile §6k fixed the *recovery* storm by debouncing one specific message, leaving every other
+alert able to repeat every few seconds for as long as its underlying situation persisted.
+
+The Notification Service — the single point every alert already passes through — now suppresses
+an alert repeated inside `NOTIFY_DEDUP_WINDOW_SECONDS` (default 300). Keyed by channel +
+severity + `dedup_key` (falling back to the title), so an alert that **escalates** is always
+delivered: same text at a worse severity is new information. **CRITICAL is never suppressed** —
+the cost of one repeated critical is noise, the cost of swallowing one is the thing this
+platform exists to avoid. The key map is bounded, because a caller interpolating an id into a
+title would otherwise grow it forever.
+
+> An operator who learns their alert channel is noise stops reading it, and then the alert that
+> matters arrives in a channel nobody trusts. Deduplication is not tidiness; it is what keeps the
+> channel load-bearing.
+
+---
+
 ## 7. Testing
 
 `backend/tests` (379 tests, all green; `mypy --strict` clean; `ruff` clean; suite runs
@@ -1608,6 +2512,134 @@ warnings-as-errors):
   Mode blocks LIVE**; readiness tuples carry the required flag),
   `test_discord_embed_builder` (category colours; only-present fields; footer +
   timestamp). `test_persistence_schema` now covers `config_snapshots`.
+- Phase 1 — Knowledge (2026-07-28), **+37 tests**: `test_knowledge_isolation`
+  (**AST-enforced**: the context imports no other bounded context at all — an allowlist, so a
+  context added later is covered without anyone remembering; its runtime does not reintroduce
+  the coupling; **every subscribed event name resolves to a real event class**, so a rename
+  breaks the build instead of silently un-recording a producer; the public domain vocabulary
+  names no action), `test_knowledge_units` (NaN/inf and blank subjects rejected at *both*
+  boundaries; a rejection is announced, never swallowed; a store failure is re-raised rather
+  than hidden; **break-even is not a win**; the verification floor orders by strength and not
+  alphabetically; a single-class memory reports itself untrainable; take-once settlement;
+  idempotent lesson append; lessons load oldest-first so a walk-forward split cannot train on
+  the future), `test_knowledge_loop` (**the whole loop over a real bus**: a closed paper trade
+  becomes a ground-truth lesson; **the lesson carries the features from entry even after the
+  token's features change completely before the close** — the anti-leakage guarantee, and the
+  one regression here that would look like success; losses recorded as negatives; the memory
+  reports `is_trainable` only with both classes; a redelivered close produces no second
+  lesson; **a close with no known notional records nothing rather than fabricating a return**;
+  committee beliefs travel with the lesson; a close is both an observation and a lesson),
+  `test_committee_learning_loop` (a `LessonLearned` reaches the outcome ledger at full weight
+  with the lesson's own features; both classes arrive; **a promotion swaps the active
+  committee without a restart**; quality signals are derived from the dataset and score
+  **0.0 for a single class** instead of the configured 0.5).
+- Phase 2 — Research as knowledge producer (2026-07-28), **+36 tests**:
+  `test_knowledge_bundle_contract` (the fixture **generated by the lab's exporter** parses and
+  checksums identically on both sides; **every external record is labelled `simulated`
+  whatever it claims**; declaring `verification` is a rejection rather than an ignored key; a
+  bundle cannot claim `paper_trading`/`executed_trade`/`scanner`/`security`/`committee`, nor
+  an `outcome` kind, nor express a lesson at all; wrong format, tampered checksum, unknown
+  keys, non-finite features, empty and oversized bundles all fail closed; a naive timestamp is
+  read as UTC rather than local), `test_knowledge_ingest` (a missing inbox is not an error;
+  accepted and rejected files are filed aside with their reason; **one bad bundle never aborts
+  the sweep**; processed sub-directories are never re-swept; a store outage files the bundle
+  for retry instead of losing it), `test_research_knowledge_flow` (the real `ResearchManager`
+  against the real `KnowledgeRuntime` over a real bus: backtest / walk-forward / Monte Carlo
+  each land under their own provenance; **the replay that had no caller now produces a fact**;
+  a promotion decision reaches memory and deploys nothing; **no study is ever ground truth**;
+  **a whole research session mints zero lessons**), plus `test_research_isolation` extended in
+  both directions (Research must not import Knowledge, Knowledge must not import Research) and
+  `test_events_registry` gaining the collision scan that catches two contexts naming an event
+  the same thing.
+- Phase 3 — the Candidate Enricher (2026-07-28), **+30 tests**:
+  `test_committee_enrichment` — organised around the four ways this component could be wrong
+  while looking right. **Enrichment is impossible to bypass** (the committee refuses a bare
+  decision context; the handler cannot be built without an enricher; every prediction carries
+  the memory it was judged with). **An empty memory changes nothing** (`prior_log_odds` is
+  exactly 0.0, the fusion with a zero prior is bit-for-bit the fusion without one, and a
+  two-trade cohort is reported but silent) — the regression that would matter most is
+  enrichment quietly recalibrating the platform. **Real history informs the verdict, in the
+  right direction and by a bounded amount** (a developer's record reaches the prior and is
+  shrunk toward ignorance; a bad record pushes the other way; good precedent raises P(ROI+)
+  *and* lowers P(SL), which one sign across all three heads would have got backwards; a
+  500-trade lopsided history still cannot exceed the cap; similar patterns are found with no
+  shared tag; a "nearest" neighbour that is nowhere near is not treated as precedent; all
+  eleven dimensions are always reported; wallet familiarity is marked `observations` and never
+  counts as an example; `sample_support` measures *this candidate*; history is stated in the
+  explanation and injected as `history.*` features only when it means something; the
+  enrichment survives persistence). **Failure degrades** (an unreachable memory never stops a
+  token being judged and is distinguishable from an empty one; a candidate with no identity is
+  still enriched). Plus the narrative classifier, including that it does not match across word
+  boundaries — *CATALYST is not a cat coin*. `test_knowledge_loop` gains
+  **the cohort keys of a decision surviving into its lesson**, without which enrichment could
+  never learn a cohort from a real trade.
+- Phase 4 — Exploration Mode (2026-07-29), **+45 tests**:
+  `test_exploration` — organised around the four ways a programme that spends money to buy
+  evidence could be wrong while looking right. **It waives the right rule and only that one**:
+  a candidate inside the exploration band with a failing security verdict, a bad developer, a
+  suspicious wallet crowd or a thin pool is still rejected by its own rule with the programme
+  active *and nothing is charged*; an open circuit breaker and Emergency Mode still block it;
+  the book's allocation limits still bind, and a grant vetoed afterwards costs the budget
+  nothing. **It ends by itself**: sufficiency requires both classes (60 lessons all on one
+  side of zero are explicitly *not* enough), reaching it latches the programme off and
+  announces `ExplorationCompleted` exactly once however many candidates follow, and a later
+  read that undercounts lessons cannot restart it. **It cannot overspend**: each of the five
+  ceilings declines with its own cause; spend is rebuilt from the ledger, so a brand-new
+  service over the same rows reaches the same conclusion (the restart bug that an in-memory
+  counter would have); yesterday's spend clears the daily window but still counts against the
+  week and the lifetime; exhaustion is announced once per window *instance*. **It stays
+  explainable**: the same inputs produce the same verdict twenty-five times running (no
+  randomness anywhere), an inverted band is not constructible, an exploration approval never
+  reads like a conviction one (`EXPLORATION` in the headline, the arithmetic in the caveats,
+  conviction pinned at 0.0, no trailing stop), and exploration approvals are counted apart from
+  the rest. Plus: the evidence census counts settled lessons and their cohorts and reports an
+  unreadable store as *unavailable* rather than empty; a broken exploration service cannot
+  manufacture an approval; and with the programme absent or disabled the chain is exactly the
+  one that ran before it existed.
+  `test_exploration_isolation` — the structural half. Exploration imports no trading or
+  learning context; its dependencies are an **allowlist** (shared kernel plus Knowledge's
+  domain, and only from its infrastructure edge); its vocabulary names no action; an
+  `ExplorationGrant` has no field that could express an approval; **the Risk Manager's safety
+  policies are not in the waivable tuple, asserted by name** (the one-line edit that would let
+  the programme buy rug pulls); its events are registered on the bus (an unregistered event is
+  silently dropped at the Redis boundary); permanent memory records the programme; and an
+  external bundle cannot claim `exploration` as its source.
+
+- 2026-07-29 — the two open decisions, **+24 tests**: `test_strategy_gate` (a **silent roster
+  is not a dissenting one**; anything but BUY vetoes; a BUY below the conviction floor is
+  vetoed; the policy has no field that could express an approval; the gate is **off by
+  default**; turning it on lands the policy in CONVICTION and **not** SAFETY, so exploration
+  can still waive it; the cheap gates still run first; the verdict reaches the candidate over
+  a real bus), `test_position_monitor` extended (a strategy SELL/EXIT exits a held position; a
+  **BUY or IGNORE never exits**; **the stop-loss still wins** when both fire on one tick;
+  nothing happens with the gate off, for a token we do not hold, or on a redelivered signal),
+  and in the lab `test_candidate_export` (**a tree model can never be exported** — refused by
+  type, with fakes that deliberately carry a `coef_`; the refusal says what to do instead; a
+  feature Core does not produce is refused; every catalogue name is accepted; the meta-model's
+  three heads; lab-only metrics travel as evidence; the bundle declares no status of its own).
+
+- 2026-07-30 — the exit latch, **+5 tests** in `test_position_monitor`: **a failed exit does
+  not strand the position** (the regression — a `FAILED` FillReport, which is how the engine
+  really reports failure, must un-latch so the next tick retries); **a failed exit keeps
+  marking the position** (the half actually observed in production: the PnL froze); a
+  *successful* exit stays latched so at-least-once delivery cannot double-sell; a latch that
+  never clears is force-released and reported; and a freshly-latched exit is **not** released
+  early, so the guard does not fight a fill legitimately in flight.
+
+- 2026-07-30 — the event bus, **+5 tests** in `test_event_infrastructure`: publishing **trims the
+  stream** and does so *approximately* (exact trimming would make every publish pay for a
+  full-stream scan); a **backlogged consumer logs an error**; a current one does not cry wolf; the
+  lag check is **rate-limited to one `XINFO` per interval**; and a failing lag check never breaks
+  the bus, because observability must not be able to stall what it observes; **orphaned messages
+  are reclaimed and handled** (the regression — without it they are never processed at all), the
+  idle threshold is respected so a consumer merely mid-dispatch is not robbed, an empty pending
+  list is a silent no-op, and a failing reclaim never breaks the bus.
+- Also fixed a **latent flaky test**: `test_yesterdays_spend_does_not_count_against_today` asserted
+  that yesterday's spend still counts against the *week*, which is false whenever the suite runs
+  on a Monday — "yesterday" is then the previous ISO week. It passed six days out of seven and
+  failed on the seventh, which is worse than not testing it, because the failure reads as a
+  regression in the code rather than in the fixture. It now asserts the lifetime ceiling, which
+  is window-independent; `week_start` is correct and is covered by the weekly-ceiling tests.
 
 Everything is testable because every dependency is a port; in-memory adapters
 back the tests, real adapters back production. The frontend passes `tsc` and a
@@ -1679,6 +2711,44 @@ Earlier pending items remain relevant:
 ---
 
 ## Changelog of this document
+
+- **2026-07-29** — **Phase 4 — Exploration Mode** (§6p). The cold start finally has a
+  deliberate answer instead of a pending decision. A new `exploration` bounded context may let
+  a candidate the Risk Manager's **conviction** gates muted be traded anyway — at a fixed
+  dollar-sized stake on an independent budget with daily, weekly and lifetime ceilings, only
+  while the memory demonstrably lacks the evidence to decide, and only when at least one of the
+  candidate's cohorts is under-sampled. It **switches itself off** on a stated arithmetic
+  condition (enough settled lessons, with a minimum on *each* side of zero — the both-classes
+  requirement that no count alone can substitute for) and latches, so no operator action is
+  needed for the programme to end. Selection is deterministic and reproducible by hand: no
+  bandit, no ε-greedy, no randomness, no model. The Risk Manager's pre-sizing rules are now
+  split into a **safety** tuple and a **conviction** tuple, and a grant can only ever waive one
+  named policy from the second — asserted by name in a test, because moving `SecurityPolicy`
+  across is a one-line edit that would compile and let the programme buy rug pulls. Risk
+  remains the only authoriser (a grant is eligibility with a ceiling, never a decision);
+  Execution was not touched. Every exploration trade feeds the Knowledge Engine through the
+  ordinary Phase-1 loop and carries an `exploration=true` tag into its settled lesson, so what
+  the platform *learned* stays separable from what it *believed*. New table
+  `exploration_grants` (`0011_exploration_ledger`), read-only `/api/v1/exploration/*`,
+  `EXPLORATION_*` settings — **off by default**. Gate: **704 tests** (+45), `mypy --strict`
+  clean (456 files), `ruff` clean.
+
+- **2026-07-28** — **Phase 3 — the Candidate Enricher** (§6o). The decision path never touched
+  permanent memory: the committee judged every token as though the platform had never seen
+  one, which is why the cold start looked like a threshold problem when it was an ignorance
+  problem. A mandatory enrichment stage now sits between the Decision Context Builder and the
+  committee and consults the Knowledge Engine along **eleven** dimensions (developer, wallets,
+  clusters, narrative, launchpad, liquidity, volatility, the token's own outcomes, similar
+  strategies, holder structure, and the nearest past patterns). It is impossible to bypass:
+  `CommitteeManager.evaluate` accepts only an `EnrichedCandidate` and `CommitteeHandler`
+  requires the enricher. Every prior is shrunk toward ignorance, silent below a minimum cohort
+  size, and fused into a **bounded** additive logit — negated on the stop-loss head. **No
+  threshold was lowered**: with an empty memory the enrichment is exactly neutral and the
+  fusion is bit-for-bit what it was. `sample_support` is now measured per candidate instead of
+  read from configuration; explanations state the history behind the number; the enrichment is
+  persisted with the prediction; and the Knowledge runtime remembers the committee's cohort
+  keys so a settled trade can be learned from as a cohort later. Gate: **659 tests** (+30),
+  `mypy --strict` clean (439 files), `ruff` clean.
 
 - **2026-07-23** — **Phase 11, Stage 2 — Final Hardening** (§6l; closing report in
   `docs/PRODUCTION_READINESS.md`). Closing pass over the whole project; **no new

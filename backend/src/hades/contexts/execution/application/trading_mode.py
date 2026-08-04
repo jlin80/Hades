@@ -17,6 +17,7 @@ posture is never inconsistent with :attr:`Settings.is_live` semantics.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 import httpx
@@ -33,9 +34,15 @@ from hades.shared_kernel.config.settings import TradingMode
 from hades.shared_kernel.domain.identifiers import new_id
 from hades.shared_kernel.errors import PermissionDeniedError, ValidationError
 from hades.shared_kernel.events import EventBus
-from hades.shared_kernel.logging import get_logger
+from hades.shared_kernel.logging import describe, get_logger
 
 _logger = get_logger("execution")
+
+#: Answers "can this platform actually place a live order right now?". The
+#: Execution Engine builds its live executor only when the hard gate *and* every
+#: live adapter (signer, quote provider, RPC) are present, so this is the single
+#: fact that separates real trading from a convincing simulation of it.
+LiveExecutorProbe = Callable[[], Awaitable[bool]]
 
 
 @dataclass(frozen=True)
@@ -73,11 +80,13 @@ class TradingModeService:
         notifier: NotificationPublisher,
         repository: TradingModeRepository | None = None,
         checklist: ProductionChecklistPort | None = None,
+        live_executor_probe: LiveExecutorProbe | None = None,
     ) -> None:
         self._settings = settings
         self._bus = event_bus
         self._notifier = notifier
         self._repo = repository
+        self._live_executor_probe = live_executor_probe
         self._checklist = checklist
 
     async def current(self) -> ModeStatus:
@@ -133,6 +142,7 @@ class TradingModeService:
                 required=False,
             )
         )
+        checks.append(await self._check_live_executor())
         checks.append(await self._check_rpc())
 
         # Phase 10: fold in the platform Production Checklist (infra/subsystems/
@@ -152,6 +162,44 @@ class TradingModeService:
                     )
                 )
         return ReadinessReport(checks=checks)
+
+    async def _check_live_executor(self) -> ReadinessCheck:
+        """Refuse LIVE unless a live executor demonstrably exists.
+
+        ``ExecutionEngine._executor_for`` falls back to the paper executor for
+        any mode it has no executor registered for. That is the right failure
+        mode for capital — no real order can escape — but on its own it is a
+        trap: every other readiness check can pass, the switch succeeds, the
+        dashboard reads LIVE, and every fill is simulated. An operator would
+        then be reading paper results as real ones, which is worse than being
+        unable to go live at all.
+
+        Fail closed. If we cannot confirm a live executor is present, the answer
+        is no.
+        """
+        if self._live_executor_probe is None:
+            return ReadinessCheck(
+                name="live_executor",
+                ok=False,
+                detail="live executor state unknown — cannot confirm real orders would be placed",
+            )
+        try:
+            available = await self._live_executor_probe()
+        except Exception as exc:  # an unanswerable probe is a failed probe
+            return ReadinessCheck(
+                name="live_executor",
+                ok=False,
+                detail=f"live executor state unreadable: {describe(exc)}",
+            )
+        return ReadinessCheck(
+            name="live_executor",
+            ok=available,
+            detail=(
+                "live executor ready"
+                if available
+                else "no live executor — orders would silently execute as paper"
+            ),
+        )
 
     async def _check_rpc(self) -> ReadinessCheck:
         url = self._settings.solana.rpc_http_url

@@ -119,9 +119,7 @@ class ExecutionEngine:
         self._orders.transition(record, OrderState.SUBMITTED)
         if self._metrics:
             self._metrics.submitted.labels(mode=mode).inc()
-        await self._bus.publish(
-            OrderSubmitted(aggregate_id=new_id(), request=request, mode=mode)
-        )
+        await self._bus.publish(OrderSubmitted(aggregate_id=new_id(), request=request, mode=mode))
 
         started = time.monotonic()
         fill = await executor.execute(request)
@@ -173,9 +171,7 @@ class ExecutionEngine:
         reason = fill.error or "unknown"
         if self._metrics:
             self._metrics.failed.labels(mode=mode, reason=_reason_label(reason)).inc()
-        await self._bus.publish(
-            OrderFailed(aggregate_id=new_id(), request=request, reason=reason)
-        )
+        await self._bus.publish(OrderFailed(aggregate_id=new_id(), request=request, reason=reason))
         await self._notifier.notify(
             title=f"Order failed · {_symbol(request.token)}",
             body=f"{request.side.value.upper()} {request.notional.amount} USD failed: {reason}",

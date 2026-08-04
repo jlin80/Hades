@@ -25,6 +25,7 @@ from hades.contexts.monitoring.domain.models import HealthStatus
 from hades.contexts.monitoring.domain.ports import HealthProbe
 from hades.contexts.monitoring.infrastructure.probes import (
     ClickHouseProbe,
+    EventBusConsumerProbe,
     HttpProbe,
     PostgresProbe,
     RedisProbe,
@@ -86,12 +87,33 @@ def build_probes(container: Container) -> list[HealthProbe]:
             s.solana.rpc_http_url,
             timeout_seconds=s.timeouts.rpc_seconds,
             latency_max_ms=s.watchdog.rpc_latency_max_ms,
+            http=container.http,
         )
     )
     http_timeout = s.timeouts.http_seconds
-    probes.append(HttpProbe("api", s.watchdog.api_health_url, timeout_seconds=http_timeout))
-    probes.append(HttpProbe("dashboard", s.watchdog.dashboard_url, timeout_seconds=http_timeout))
+    probes.append(
+        HttpProbe(
+            "api", s.watchdog.api_health_url, timeout_seconds=http_timeout, http=container.http
+        )
+    )
+    probes.append(
+        HttpProbe(
+            "dashboard", s.watchdog.dashboard_url, timeout_seconds=http_timeout, http=container.http
+        )
+    )
     probes.append(ClickHouseProbe(container.clickhouse))
+    # Assembled here rather than only in the Watchdog because this list is what
+    # `/health` reports *and* what the Production Checklist gates the switch to
+    # LIVE on. A bus with no live consumer is precisely the state that must not
+    # be allowed to reach live trading: it looks operational from every other
+    # angle, and the Worker's loop stayed dead for four days proving it.
+    probes.append(
+        EventBusConsumerProbe(
+            container.redis,
+            stream_prefix=s.event_bus.stream_prefix,
+            max_idle_seconds=s.watchdog.event_bus_max_idle_seconds,
+        )
+    )
     return probes
 
 
@@ -199,8 +221,11 @@ async def _run() -> int:
         report = await validator.validate()
         for check in report.checks:
             _logger.info(
-                "preflight_check", name=check.name, ok=check.ok,
-                required=check.required, detail=check.detail,
+                "preflight_check",
+                name=check.name,
+                ok=check.ok,
+                required=check.required,
+                detail=check.detail,
             )
         await validator.notify(report)
         _logger.info("preflight_complete", ok=report.ok, required_failed=report.required_failed)

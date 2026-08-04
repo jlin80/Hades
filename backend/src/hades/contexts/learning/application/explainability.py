@@ -13,6 +13,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from hades.contexts.learning.domain.models import (
+    CandidateEnrichment,
     CommitteeExplanation,
     ConfidenceFactors,
     Direction,
@@ -36,19 +37,60 @@ class ExplanationBuilder:
         opinions: Sequence[Opinion],
         confidence: ConfidenceFactors,
         regime: RegimeAssessment,
+        enrichment: CandidateEnrichment | None = None,
         max_items: int = 5,
     ) -> CommitteeExplanation:
-        drivers = self._collect(opinions, Direction.UP, max_items)
-        risks = self._collect(opinions, Direction.DOWN, max_items)
-        caveats = self._caveats(confidence, regime)
+        drivers = list(self._collect(opinions, Direction.UP, max_items))
+        risks = list(self._collect(opinions, Direction.DOWN, max_items))
+        caveats = list(self._caveats(confidence, regime))
+
+        # History is stated in the explanation, not only applied to the number.
+        # A prior that moves a probability without appearing in the account of
+        # why is the same black box this context exists to refuse.
+        history, history_caveat = self._history(enrichment)
+        if history:
+            (drivers if (enrichment and enrichment.prior_log_odds >= 0.0) else risks).extend(
+                history
+            )
+        if history_caveat:
+            caveats.append(history_caveat)
+
         return CommitteeExplanation(
             headline=self._headline(meta, confidence),
-            drivers=drivers,
-            risks=risks,
-            caveats=caveats,
+            drivers=tuple(drivers),
+            risks=tuple(risks),
+            caveats=tuple(caveats),
         )
 
     # -- internals ------------------------------------------------------------
+
+    @staticmethod
+    def _history(enrichment: CandidateEnrichment | None) -> tuple[list[str], str]:
+        """Turn the enrichment into legible lines plus, when relevant, a caveat."""
+        if enrichment is None:
+            # Structurally unreachable — the committee only accepts enriched
+            # candidates — but stated rather than assumed, because a silent
+            # "no history section" and "history was never consulted" would look
+            # identical to a reader, which is the exact confusion this phase ends.
+            return ([], "no enrichment attached to this candidate")
+        if not enrichment.evidence_available:
+            return ([], "no comparable history yet — judged on present evidence alone")
+
+        lines: list[str] = []
+        informative = sorted(
+            (p for p in enrichment.priors if p.is_informative),
+            key=lambda p: p.strength,
+            reverse=True,
+        )
+        for prior in informative[:3]:
+            lines.append(
+                f"history ({prior.dimension.value}): {prior.samples} comparable, "
+                f"{round(prior.raw_positive_rate * 100)}% profitable"
+            )
+        caveat = ""
+        if enrichment.sample_support < 0.25:
+            caveat = "historical precedent is thin — few comparable settled trades"
+        return (lines, caveat)
 
     @staticmethod
     def _headline(meta: MetaPrediction, confidence: ConfidenceFactors) -> str:

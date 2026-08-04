@@ -14,6 +14,7 @@ from typing import Protocol, runtime_checkable
 
 from hades.contexts.learning.domain.events import CommitteePredictionGenerated
 from hades.contexts.risk.domain.models import (
+    ExplorationGrant,
     PolicyOutcome,
     PortfolioRiskState,
     RiskAssessment,
@@ -53,6 +54,34 @@ class RiskPolicy(Protocol):
         state: PortfolioRiskState,
         proposed_notional_usd: float,
     ) -> PolicyOutcome: ...
+
+
+@runtime_checkable
+class ExplorationPort(Protocol):
+    """The cold-start exploration programme, as the Risk Manager sees it.
+
+    Declared here, by the consumer, and deliberately shaped so that it cannot be
+    used to do anything except *ask*. There is no method on it that approves, and
+    the type it returns — :class:`ExplorationGrant` — is the Risk Manager's own,
+    so a collaborator on the other side of this port cannot smuggle a decision
+    across in a vocabulary the guardian does not control.
+
+    ``consider`` is asked only when a **conviction** policy has vetoed a
+    candidate, never a safety one, and the name of that policy is passed so the
+    grant can record precisely what it waives. ``commit`` is called only after
+    the full chain approves: a grant that is later vetoed by an allocation rule
+    must cost the exploration budget nothing.
+
+    Implementations must not raise. Exploration is optional spending bolted to
+    the side of the guardian's hot path; a failure there is a reason to decline a
+    grant, never a reason for a risk decision to fail.
+    """
+
+    async def consider(
+        self, candidate: RiskCandidate, *, waived_policy: str
+    ) -> ExplorationGrant | None: ...
+
+    async def commit(self, candidate: RiskCandidate, grant: ExplorationGrant) -> None: ...
 
 
 @runtime_checkable

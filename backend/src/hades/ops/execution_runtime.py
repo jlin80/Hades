@@ -33,6 +33,11 @@ from hades.contexts.execution.application.trading_mode import TradingModeService
 from hades.contexts.execution.application.wallet_manager import WalletManager
 from hades.contexts.execution.infrastructure.trading_mode_repository import TradingModeRepository
 from hades.contexts.market.infrastructure.price_oracle import DexScreenerPriceOracle
+from hades.contexts.portfolio.domain.ports import PortfolioStateStore
+from hades.contexts.portfolio.infrastructure.stores import (
+    InMemoryPortfolioStateStore,
+    PostgresPortfolioStateStore,
+)
 from hades.contexts.risk.domain.events import TradeApproved
 from hades.shared_kernel.cache import CacheService
 from hades.shared_kernel.domain.events import DomainEvent
@@ -55,11 +60,7 @@ class ExecutionRuntime:
         self._metrics = ExecutionMetrics(container.metrics)
         self._cache = CacheService(container.redis, namespace=EXECUTION_STATUS_NAMESPACE)
 
-        repo = (
-            TradingModeRepository(container.database)
-            if container.database is not None
-            else None
-        )
+        repo = TradingModeRepository(container.database) if container.database is not None else None
         self._mode_service = TradingModeService(
             container.settings,
             event_bus=container.event_bus,
@@ -120,6 +121,9 @@ class ExecutionRuntime:
             event_bus=self._c.event_bus,
             interval_seconds=e.position_monitor_interval_seconds,
             max_slippage_bps=e.max_slippage_bps,
+            # One switch turns the Strategy Engine on in both directions: it may
+            # veto an entry in the Risk Manager, and request an exit here.
+            honour_strategy_exits=self._c.settings.strategy.gate_risk,
         )
 
     async def _resolve_mode(self) -> str:
@@ -141,7 +145,63 @@ class ExecutionRuntime:
 
     # -- lifecycle ------------------------------------------------------------
 
+    def _build_portfolio_store(self) -> PortfolioStateStore:
+        if self._c.database is not None:
+            return PostgresPortfolioStateStore(self._c.database)
+        return InMemoryPortfolioStateStore()
+
+    async def _resume_open_positions(self) -> None:
+        """Re-arm the monitor over positions that survived the last restart.
+
+        The Portfolio Manager rehydrates its book on startup but the monitor had
+        no equivalent, so a recovered position was owned by the book and watched
+        by nobody — never marked to market, and beyond the reach of the exit the
+        Risk Manager approved for it. Reading the same durable snapshot closes
+        that asymmetry.
+
+        Best-effort by construction: failing to resume must not stop the engine
+        from starting, but it must be loud, because the cost is a position that
+        can only be closed by hand.
+        """
+        if self._monitor is None:
+            return
+        store = self._build_portfolio_store()
+        try:
+            book = await store.load(mode=self._c.settings.trading_mode.value)
+        except Exception as exc:
+            _logger.error("position_resume_failed", error=str(exc))
+            return
+        if book is None or not book.positions:
+            return
+
+        resumed = 0
+        stranded: list[str] = []
+        for position_id, persisted in book.positions.items():
+            if not persisted.is_monitorable:
+                stranded.append(str(persisted.token.mint))
+                continue
+            assert persisted.entry_price is not None and persisted.quantity is not None
+            if self._monitor.resume(
+                position_id=position_id,
+                token=persisted.token,
+                entry_price=persisted.entry_price,
+                quantity=persisted.quantity,
+                tags=persisted.tags,
+            ):
+                resumed += 1
+        _logger.info("positions_resumed", resumed=resumed, stranded=len(stranded))
+        if stranded:
+            # Written before this snapshot carried entry facts. Nothing can mark
+            # these; say so rather than let them sit at a frozen PnL forever.
+            _logger.error(
+                "positions_not_resumable",
+                count=len(stranded),
+                mints=stranded[:10],
+                note="snapshot predates entry-price persistence; close these manually",
+            )
+
     async def start(self) -> list[asyncio.Task[None]]:
+        await self._resume_open_positions()
         tasks = [asyncio.create_task(self._publish_status_loop(), name="execution-status")]
         if self._monitor is not None:
             tasks.extend(await self._monitor.start())

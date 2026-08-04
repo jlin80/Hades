@@ -21,7 +21,7 @@ from hades.contexts.research.domain.events import (
     FeatureProposed,
     PromotionRejected,
     ResearchReportGenerated,
-    StrategyPromoted,
+    ResearchStrategyPromoted,
 )
 from hades.contexts.research.domain.models import (
     CandidateStrategy,
@@ -54,7 +54,7 @@ class _Capture:
             "ExperimentFinished",
             "BacktestCompleted",
             "FeatureProposed",
-            "StrategyPromoted",
+            "ResearchStrategyPromoted",
             "PromotionRejected",
             "ResearchReportGenerated",
             "StrategyCompared",
@@ -154,21 +154,21 @@ async def test_promotion_requires_human_even_when_metrics_pass() -> None:
             trades=600, sharpe=1.6, max_drawdown=0.12, profit_factor=1.7, expectancy=0.03
         ),
     )
-    # Without manual approval → rejected, no StrategyPromoted event.
+    # Without manual approval → rejected, no ResearchStrategyPromoted event.
     d1 = await manager.evaluate_promotion(
         strong, paper_positive=True, shadow_positive=True, manual_approve=False
     )
     assert not d1.promotable
     assert cap.of(PromotionRejected)
-    assert not cap.of(StrategyPromoted)
+    assert not cap.of(ResearchStrategyPromoted)
 
-    # With explicit human approval → promotable, emits StrategyPromoted (a
+    # With explicit human approval → promotable, emits ResearchStrategyPromoted (a
     # governance record; it still deploys nothing).
     d2 = await manager.evaluate_promotion(
         strong, paper_positive=True, shadow_positive=True, manual_approve=True
     )
     assert d2.promotable
-    assert cap.of(StrategyPromoted)
+    assert cap.of(ResearchStrategyPromoted)
 
 
 async def test_generate_report_persists_and_emits() -> None:

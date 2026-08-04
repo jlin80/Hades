@@ -16,6 +16,7 @@ from hades.shared_kernel.persistence.models.event_store import (
     DomainEventRecord,
     EventSnapshot,
 )
+from hades.shared_kernel.persistence.models.exploration import ExplorationGrantRecord
 from hades.shared_kernel.persistence.models.intelligence import (
     IntelClusterRecord,
     WalletHistoryRecord,
@@ -23,6 +24,11 @@ from hades.shared_kernel.persistence.models.intelligence import (
     WalletProfileRecord,
     WalletRelationshipRecord,
     WalletTimelineRecord,
+)
+from hades.shared_kernel.persistence.models.knowledge import (
+    KnowledgeDecisionRecord,
+    KnowledgeLessonRecord,
+    KnowledgeObservationRecord,
 )
 from hades.shared_kernel.persistence.models.learning import (
     CommitteeDatasetRecord,
@@ -104,9 +110,13 @@ __all__ = [
     "EquityCurve",
     "EventSnapshot",
     "Experiment",
+    "ExplorationGrantRecord",
     "Feature",
     "HealthCheck",
     "IntelClusterRecord",
+    "KnowledgeDecisionRecord",
+    "KnowledgeLessonRecord",
+    "KnowledgeObservationRecord",
     "LiveTrade",
     "MarketData",
     "Model",

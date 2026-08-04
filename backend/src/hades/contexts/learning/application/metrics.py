@@ -33,6 +33,24 @@ class LearningMetrics:
             "hades_committee_errors_total",
             "Unhandled errors while running the committee",
         )
+        self.enrichments = metrics.counter(
+            "hades_committee_enrichments_total",
+            "Candidates enriched from the Knowledge Engine, by evidence outcome",
+            ("evidence",),
+        )
+        self.enrichment_seconds = metrics.histogram(
+            "hades_committee_enrichment_seconds",
+            "Wall-clock time to enrich one candidate from permanent memory",
+            buckets=(0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0),
+        )
+        self.last_prior_log_odds = metrics.gauge(
+            "hades_committee_last_prior_log_odds",
+            "Most recent historical prior applied to the fused probabilities",
+        )
+        self.last_enrichment_samples = metrics.gauge(
+            "hades_committee_last_enrichment_samples",
+            "Comparable historical samples behind the most recent enrichment",
+        )
         self.models_registered = metrics.counter(
             "hades_models_registered_total",
             "Models appended to the registry",

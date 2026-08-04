@@ -7,8 +7,18 @@ regime changes and errors. This service is the write-path into the append-only
 
 Two entry points:
 
-    * :meth:`record_outcome` — a closed trade's realised labels (called by the
-      execution/portfolio context in a later phase).
+    * :meth:`record_outcome` — a closed trade's realised labels. Called by the
+      composition root when the Knowledge context announces a completed
+      ``LessonLearned``: a decision married to its outcome, carrying the feature
+      vector **as it stood when the decision was taken**.
+
+      This used to be unreachable. The docstring said the execution/portfolio
+      context would call it "in a later phase"; that phase never arrived, so the
+      ledger only ever accumulated the weak negatives below. A single-class
+      dataset has an undefined AUC, so ``ValidationEngine``'s ``min_auc`` gate
+      could never be met, no candidate was ever validated, and the committee
+      stayed pinned to its default priors — the real cold-start lock, not the
+      probability threshold it was long mistaken for.
     * :meth:`on_token_rejected` — reacts to the Security Engine rejecting a token
       and records it as a (weakly-labelled) negative example, so the committee
       also learns from what the platform declined.

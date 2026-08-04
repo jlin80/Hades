@@ -17,11 +17,14 @@ from hades.api.dependencies import get_container
 from hades.bootstrap import Container
 from hades.ops.risk_runtime import PORTFOLIO_STATUS_NAMESPACE, STATUS_KEY
 from hades.shared_kernel.cache import CacheService
+from hades.shared_kernel.logging import describe, get_logger
 from hades.shared_kernel.persistence.models.portfolio import (
     EquityCurve,
     PnLHistory,
     PortfolioHistory,
 )
+
+_logger = get_logger("api.portfolio")
 
 router = APIRouter(prefix="/api/v1/portfolio", tags=["portfolio"])
 
@@ -30,6 +33,28 @@ router = APIRouter(prefix="/api/v1/portfolio", tags=["portfolio"])
 async def portfolio(container: Container = Depends(get_container)) -> dict[str, Any]:
     live = await _live(container)
     return {"running": live is not None, "live": live or {}}
+
+
+@router.get("/positions", summary="Open positions — which tokens hold the invested capital")
+async def positions(container: Container = Depends(get_container)) -> dict[str, Any]:
+    """The open book, one row per position.
+
+    ``invested_usd`` says how much capital left cash; this says where it went.
+    Without it the dashboard could report "1 open position" and an operator had
+    no way to learn which token held it — the single most common question asked
+    of a running bot, and the one the API could not answer.
+
+    Sourced from the Worker's Redis snapshot, so it reflects the live in-memory
+    book rather than a replayed event log.
+    """
+    live = await _live(container) or {}
+    rows = live.get("positions")
+    return {
+        "positions": rows if isinstance(rows, list) else [],
+        "open_positions": live.get("open_positions", 0),
+        "invested_usd": live.get("invested_usd", 0.0),
+        "updated_at": live.get("updated_at"),
+    }
 
 
 @router.get("/analytics", summary="Portfolio performance metrics")
@@ -125,7 +150,8 @@ async def _live(container: Container) -> dict[str, Any] | None:
     cache = CacheService(container.redis, namespace=PORTFOLIO_STATUS_NAMESPACE)
     try:
         result = await cache.get(STATUS_KEY)
-    except Exception:
+    except Exception as exc:
+        _logger.warning("api_query_failed", endpoint="_live", error=describe(exc))
         return None
     return result if isinstance(result, dict) else None
 
@@ -136,5 +162,6 @@ async def _rows(container: Container, stmt: Any) -> list[Any]:
     try:
         async with container.database.session() as session:
             return list((await session.scalars(stmt)).all())
-    except Exception:
+    except Exception as exc:
+        _logger.warning("api_query_failed", endpoint="_rows", error=describe(exc))
         return []

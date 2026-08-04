@@ -74,12 +74,14 @@ def test_container_healthcheck_ignores_dependency_failures() -> None:
         # No Postgres/Redis/RPC in a test process, so the aggregate is unhealthy.
         assert client.get("/health").json()["status"] == "unhealthy"
 
-        with mock.patch("hades.ops.healthcheck.httpx.get", side_effect=_via(client)):
+        # httpx is imported inside _check_http (keeping the liveness path cheap), so
+        # the patch targets the module itself rather than an attribute of this one.
+        with mock.patch("httpx.get", side_effect=_via(client)):
             assert _check_http() == 0
 
 
 def test_container_healthcheck_fails_when_the_api_itself_cannot_answer() -> None:
     from hades.ops.healthcheck import _check_http
 
-    with mock.patch("hades.ops.healthcheck.httpx.get", side_effect=httpx.ConnectError("refused")):
+    with mock.patch("httpx.get", side_effect=httpx.ConnectError("refused")):
         assert _check_http() == 1

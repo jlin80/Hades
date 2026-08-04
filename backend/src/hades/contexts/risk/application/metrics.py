@@ -23,6 +23,15 @@ class RiskMetrics:
             "Trades rejected by the Risk Manager, by reason",
             ("reason",),
         )
+        # Counted apart from ``approvals`` because the two must never be summed
+        # together when judging the platform's results: an exploration trade was
+        # taken to generate evidence, not because the platform believed in it,
+        # and folding it into the headline approval count would let a programme
+        # of deliberate small losses read as a strategy performing badly.
+        self.exploration_approvals = metrics.counter(
+            "hades_risk_exploration_approvals_total",
+            "Approved trades taken under the exploration programme",
+        )
         self.errors = metrics.counter(
             "hades_risk_errors_total",
             "Unhandled errors while evaluating risk",

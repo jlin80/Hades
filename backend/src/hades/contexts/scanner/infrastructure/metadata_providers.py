@@ -16,7 +16,7 @@ import httpx
 
 from hades.contexts.common.domain.value_objects import TokenRef
 from hades.contexts.scanner.domain.models import TokenMetadata
-from hades.shared_kernel.logging import get_logger
+from hades.shared_kernel.logging import describe, get_logger
 from hades.shared_kernel.solana import RpcManager
 
 _logger = get_logger("scanner.metadata.provider")
@@ -28,9 +28,24 @@ class RpcMetadataProvider:
     def __init__(self, rpc: RpcManager) -> None:
         self._rpc = rpc
 
+    #: The mint account is the *only* source for these; nothing off-chain has them.
+    PROVIDES = frozenset(
+        {
+            "decimals",
+            "total_supply",
+            "mint_authority",
+            "freeze_authority",
+            "program",
+        }
+    )
+
     @property
     def name(self) -> str:
         return "rpc"
+
+    @property
+    def provides(self) -> frozenset[str]:
+        return self.PROVIDES
 
     async def collect(self, token: TokenRef) -> TokenMetadata | None:
         try:
@@ -39,7 +54,7 @@ class RpcMetadataProvider:
                 [str(token.mint), {"encoding": "jsonParsed"}],
             )
         except Exception as exc:  # provider must never raise
-            _logger.warning("rpc_metadata_failed", mint=str(token.mint), error=str(exc))
+            _logger.warning("rpc_metadata_failed", mint=str(token.mint), error=describe(exc))
             return None
         value = (result or {}).get("value") if isinstance(result, dict) else None
         if not isinstance(value, dict):
@@ -75,9 +90,27 @@ class DexScreenerMetadataProvider:
         self._client = client
         self._owns_client = client is None
 
+    #: Human/social metadata only — DexScreener's pair payload carries no
+    #: on-chain facts, so it can never fill in decimals or an authority.
+    PROVIDES = frozenset(
+        {
+            "name",
+            "symbol",
+            "logo_uri",
+            "website",
+            "twitter",
+            "telegram",
+            "discord",
+        }
+    )
+
     @property
     def name(self) -> str:
         return "dexscreener"
+
+    @property
+    def provides(self) -> frozenset[str]:
+        return self.PROVIDES
 
     async def collect(self, token: TokenRef) -> TokenMetadata | None:
         client = self._ensure_client()
@@ -86,7 +119,9 @@ class DexScreenerMetadataProvider:
             resp.raise_for_status()
             payload = resp.json()
         except Exception as exc:  # provider must never raise
-            _logger.warning("dexscreener_metadata_failed", mint=str(token.mint), error=str(exc))
+            _logger.warning(
+                "dexscreener_metadata_failed", mint=str(token.mint), error=describe(exc)
+            )
             return None
         pairs = payload.get("pairs") if isinstance(payload, dict) else None
         if not pairs:

@@ -104,6 +104,10 @@ class ResearchRuntime:
             candidate_store=self._candidates,
             promotion_store=self._promotions,
             report_store=self._reports,
+            # The same read-only reader the auto-research loop uses. It is what
+            # makes the Replay Engine reachable — it had no caller at all until
+            # now, so a study the lab was built to run could never produce a fact.
+            historical_reader=self._reader,
             criteria=PromotionCriteria(
                 min_trades=rs.promo_min_trades,
                 min_sharpe=rs.promo_min_sharpe,
@@ -125,9 +129,7 @@ class ResearchRuntime:
 
     def _register(self) -> None:
         if self._c.settings.research.shadow_enabled:
-            self._c.event_bus.subscribe(
-                FeaturesComputed.__name__, self._on_features_computed
-            )
+            self._c.event_bus.subscribe(FeaturesComputed.__name__, self._on_features_computed)
 
     async def _on_features_computed(self, event: DomainEvent) -> None:
         await self._shadow_handler.on_features_computed(event)

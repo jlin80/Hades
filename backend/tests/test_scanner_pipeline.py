@@ -141,8 +141,15 @@ async def test_pipeline_processes_and_emits() -> None:
     pipeline = _pipeline(repo, bus)
     await pipeline.start()
     await pipeline.enqueue(_candidate())
-    for _ in range(200):
-        if _MINT in repo.metadata:
+    # Wait for the *last* thing the unit of work does, not the first. The worker
+    # writes the repository and only then publishes TokenDiscovered followed by
+    # TokenMetadataCollected, so polling on `repo.metadata` and stopping the
+    # pipeline the moment it appeared cut the worker off mid-publish: on a
+    # contended machine this failed with `discovered == 1` and
+    # `metadata_events == 0`, which reads like a broken pipeline and was a broken
+    # test.
+    for _ in range(500):
+        if metadata_events:
             break
         await asyncio.sleep(0.01)
     await pipeline.stop()

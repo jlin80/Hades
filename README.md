@@ -258,8 +258,11 @@ An **offline** R&D environment that works on **copies** of history and produces
 model. Isolation is structural (a test AST-parses every research file and fails the build if
 it imports execution/risk/portfolio). It ships backtesting (net of frictions), walk-forward,
 Monte Carlo, a multi-objective optimizer, shadow evaluation, a validation gauntlet and a
-**fail-closed, human-gated** promotion path. Disabled by default (`RESEARCH_LAB_ENABLED`);
-served under `/api/v1/research/*`.
+**fail-closed, human-gated** promotion path. Disabled by default; served under
+`/api/v1/research/*`. Turning it on takes **both** `RESEARCH_LAB_ENABLED` (starts the
+runtime) and `RESEARCH_AUTO_RESEARCH` (schedules the studies) — with only the first, the
+lab reports Running and studies nothing. See
+[`docs/OPERATING.md`](docs/OPERATING.md#turning-the-research-lab-on).
 
 ## 13. Backups
 

@@ -1,0 +1,44 @@
+# =============================================================================
+# HADES — live-trading overlay (opt-in, never loaded automatically)
+# =============================================================================
+# Mounts the trading wallet's keypair as a Docker secret so the signer can reach
+# it. Deliberately a separate file rather than part of docker-compose.yml: a
+# required secret makes `docker compose up` fail outright when the file is
+# absent, which would break every paper deployment that has no wallet — and the
+# overwhelming majority of runs are paper. Opting in with `-f` also makes going
+# live an explicit act rather than a side effect of a normal deploy.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.live.yml up -d
+#
+# Provisioning the key (on the host, once):
+#   mkdir -p secrets && chmod 700 secrets
+#   cp /path/to/your-keypair.json secrets/hades_wallet.json
+#   chmod 600 secrets/hades_wallet.json
+#
+# The file is the standard Solana CLI keypair format (a JSON array of 64 bytes).
+# `secrets/` is gitignored. The key is mounted read-only into the WORKER alone —
+# the only service that signs — so the API, dashboard and everything else cannot
+# read it even if compromised. Nothing ever sends it over the network or to the
+# dashboard: `WalletManager` exposes the public key and balance only.
+#
+# Also set in .env:
+#   WALLET_PUBLIC_KEY=<the matching public key>
+#   HADES_LIVE_TRADING_ENABLED=true
+#
+# NOTE: as of this writing the live execution path is not implemented — there is
+# no TransactionSigner, no swap quote provider, and `ExecutionRuntime` passes
+# neither. The live-readiness check reports this and refuses the switch. This
+# overlay provisions the key so that path has what it needs once it exists; on
+# its own it does not enable live trading.
+# =============================================================================
+services:
+  worker:
+    secrets:
+      - source: hades_wallet
+        target: hades_wallet.json
+        mode: 0400
+
+secrets:
+  hades_wallet:
+    file: ${WALLET_KEYPAIR_FILE:-./secrets/hades_wallet.json}

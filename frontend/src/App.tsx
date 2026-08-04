@@ -1,23 +1,22 @@
-import { Route, Routes } from "react-router-dom";
+import { Navigate, Route, Routes } from "react-router-dom";
 import { ModeSwitch } from "./components/ModeSwitch";
 import { Sidebar } from "./components/Sidebar";
 import { useLiveStatus } from "./hooks";
-import { AIScreen } from "./pages/AIScreen";
-import { ConfigScreen } from "./pages/ConfigScreen";
-import { HealthScreen } from "./pages/HealthScreen";
-import { IntelligenceScreen } from "./pages/IntelligenceScreen";
-import { LogsScreen } from "./pages/LogsScreen";
+import {
+  ConfigurationGroup,
+  IntelligenceGroup,
+  LogsGroup,
+  SystemGroup,
+} from "./pages/groups";
 import { PortfolioScreen } from "./pages/PortfolioScreen";
 import { ResearchScreen } from "./pages/ResearchScreen";
-import { RiskScreen } from "./pages/RiskScreen";
-import { ScannerScreen } from "./pages/ScannerScreen";
-import { SystemScreen } from "./pages/SystemScreen";
-import { TerminalScreen } from "./pages/TerminalScreen";
-import { TradingModeScreen } from "./pages/TradingModeScreen";
 
 // Control-center shell: fixed sidebar, a header with the guarded Paper/Live
-// switch and live status, and the routed screen area. Real per-screen data
-// arrives in later phases — Phase 2 establishes the structure.
+// switch and live status, and the routed screen area.
+//
+// Navigation is grouped: six entries, each hosting the related screens as tabs
+// (see `pages/groups.tsx`). The twelve original paths are kept as redirects into
+// the tab that now holds them, so existing links and bookmarks still resolve.
 export default function App() {
   const status = useLiveStatus();
 
@@ -47,18 +46,29 @@ export default function App() {
 
         <main className="flex-1 overflow-y-auto p-6">
           <Routes>
-            <Route path="/" element={<SystemScreen />} />
-            <Route path="/trading" element={<TradingModeScreen />} />
-            <Route path="/scanner" element={<ScannerScreen />} />
-            <Route path="/intelligence" element={<IntelligenceScreen />} />
+            {/* Grouped screens. */}
+            <Route path="/" element={<SystemGroup />} />
+            <Route path="/intelligence" element={<IntelligenceGroup />} />
             <Route path="/portfolio" element={<PortfolioScreen />} />
             <Route path="/research" element={<ResearchScreen />} />
-            <Route path="/risk" element={<RiskScreen />} />
-            <Route path="/ai" element={<AIScreen />} />
-            <Route path="/health" element={<HealthScreen />} />
-            <Route path="/logs" element={<LogsScreen />} />
-            <Route path="/terminal" element={<TerminalScreen />} />
-            <Route path="/config" element={<ConfigScreen />} />
+            <Route path="/logs" element={<LogsGroup />} />
+            <Route path="/config" element={<ConfigurationGroup />} />
+
+            {/* Legacy paths — preserved so old links keep working. */}
+            <Route path="/health" element={<Navigate to="/?tab=health" replace />} />
+            <Route
+              path="/scanner"
+              element={<Navigate to="/intelligence?tab=scanner" replace />}
+            />
+            <Route path="/ai" element={<Navigate to="/intelligence?tab=ai" replace />} />
+            <Route
+              path="/terminal"
+              element={<Navigate to="/logs?tab=terminal" replace />}
+            />
+            <Route path="/trading" element={<Navigate to="/config?tab=trading" replace />} />
+            <Route path="/risk" element={<Navigate to="/config?tab=risk" replace />} />
+
+            <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </main>
       </div>

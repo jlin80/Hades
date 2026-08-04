@@ -19,11 +19,14 @@ from hades.api.dependencies import get_container
 from hades.bootstrap import Container
 from hades.ops.security_runtime import SECURITY_STATUS_KEY, SECURITY_STATUS_NAMESPACE
 from hades.shared_kernel.cache import CacheService
+from hades.shared_kernel.logging import describe, get_logger
 from hades.shared_kernel.persistence.models import (
     BlacklistEntry,
     SecurityAssessmentRecord,
     WhitelistEntry,
 )
+
+_logger = get_logger("api.security")
 
 router = APIRouter(prefix="/api/v1/security", tags=["security"])
 
@@ -80,7 +83,8 @@ async def security_rejections(
                     .limit(min(limit, 200))
                 )
             ).all()
-    except Exception:  # never fail the dashboard on a DB hiccup
+    except Exception as exc:  # never fail the dashboard on a DB hiccup
+        _logger.warning("api_query_failed", endpoint="security_rejections", error=describe(exc))
         return {"rejections": []}
     return {
         "rejections": [
@@ -118,7 +122,8 @@ async def security_lists(
                     .limit(min(limit, 200))
                 )
             ).all()
-    except Exception:  # never fail the dashboard on a DB hiccup
+    except Exception as exc:  # never fail the dashboard on a DB hiccup
+        _logger.warning("api_query_failed", endpoint="security_lists", error=describe(exc))
         return {"blacklist": [], "whitelist": []}
     return {
         "blacklist": [_list_view(b) for b in black],
@@ -133,7 +138,8 @@ async def _live_status(container: Container) -> dict[str, Any] | None:
     cache = CacheService(container.redis, namespace=SECURITY_STATUS_NAMESPACE)
     try:
         result = await cache.get(SECURITY_STATUS_KEY)
-    except Exception:  # dashboard must render even if Redis is down
+    except Exception as exc:  # dashboard must render even if Redis is down
+        _logger.warning("api_query_failed", endpoint="_live_status", error=describe(exc))
         return None
     return result if isinstance(result, dict) else None
 
@@ -156,7 +162,8 @@ async def _counts(container: Container) -> dict[str, Any]:
                 .where(SecurityAssessmentRecord.approved.is_(True))
             )
             avg = await session.scalar(select(func.avg(SecurityAssessmentRecord.score)))
-    except Exception:  # never fail the endpoint on a DB hiccup
+    except Exception as exc:  # never fail the endpoint on a DB hiccup
+        _logger.warning("api_query_failed", endpoint="_counts", error=describe(exc))
         return empty
     total_i = int(total or 0)
     approved_i = int(approved or 0)

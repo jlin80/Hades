@@ -52,9 +52,8 @@ class SelfEvaluator:
         net = sum(pnls)
         recovery = (net / max_dd) if max_dd > 0 else (net if net > 0 else 0.0)
 
-        degraded = (
-            trades >= self._min_trades
-            and (profit_factor < self._degrade_pf or win_rate < self._degrade_wr)
+        degraded = trades >= self._min_trades and (
+            profit_factor < self._degrade_pf or win_rate < self._degrade_wr
         )
 
         return StrategyPerformance(

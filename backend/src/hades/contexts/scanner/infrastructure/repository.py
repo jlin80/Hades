@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -104,16 +105,38 @@ class DiscoveryRepository:
             token.attributes = pools
 
     async def record_anomaly(self, *, subject: str, kind: str, field: str, detail: str) -> None:
-        async with self._db.session() as session:
-            session.add(
-                DataAnomaly(
-                    subject=subject,
-                    kind=kind,
-                    field=field,
-                    detail=detail,
-                    detected_at=datetime.now(UTC),
-                )
+        """Record one sighting of a problem, collapsing repeats onto one row.
+
+        Re-seeing the same ``(subject, kind, field)`` bumps ``occurrences`` and
+        the last-seen timestamp rather than appending a row — a token rescanned
+        a thousand times is one anomaly seen a thousand times, not a thousand
+        anomalies. ``detail`` is refreshed because it can carry a changing
+        measurement (an outlier's z-score) and the latest reading is the useful
+        one.
+        """
+        now = datetime.now(UTC)
+        stmt = (
+            pg_insert(DataAnomaly)
+            .values(
+                subject=subject,
+                kind=kind,
+                field=field,
+                detail=detail,
+                occurrences=1,
+                first_detected_at=now,
+                detected_at=now,
             )
+            .on_conflict_do_update(
+                constraint="uq_data_anomalies_problem",
+                set_={
+                    "detail": detail,
+                    "occurrences": DataAnomaly.__table__.c.occurrences + 1,
+                    "detected_at": now,
+                },
+            )
+        )
+        async with self._db.session() as session:
+            await session.execute(stmt)
 
     async def _token(self, session: AsyncSession, mint: str) -> Token | None:
         result = await session.execute(select(Token).where(Token.mint == mint))
@@ -131,7 +154,7 @@ class InMemoryDiscoveryRepository:
         self.tokens: dict[str, RawTokenCandidate] = {}
         self.metadata: dict[str, TokenMetadata] = {}
         self.pools: list[RawPool] = []
-        self.anomalies: list[dict[str, str]] = []
+        self.anomalies: list[dict[str, Any]] = []
 
     async def upsert_token(self, candidate: RawTokenCandidate) -> None:
         self.tokens[str(candidate.token.mint)] = candidate
@@ -143,4 +166,12 @@ class InMemoryDiscoveryRepository:
         self.pools.append(pool)
 
     async def record_anomaly(self, *, subject: str, kind: str, field: str, detail: str) -> None:
-        self.anomalies.append({"subject": subject, "kind": kind, "field": field, "detail": detail})
+        # Mirrors the Postgres upsert: one row per distinct problem, counted.
+        for existing in self.anomalies:
+            if (existing["subject"], existing["kind"], existing["field"]) == (subject, kind, field):
+                existing["detail"] = detail
+                existing["occurrences"] = int(existing["occurrences"]) + 1
+                return
+        self.anomalies.append(
+            {"subject": subject, "kind": kind, "field": field, "detail": detail, "occurrences": 1}
+        )

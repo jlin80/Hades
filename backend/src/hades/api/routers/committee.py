@@ -25,12 +25,15 @@ from hades.contexts.learning.application.registry import ModelRegistryService
 from hades.contexts.learning.infrastructure.model_registry import PostgresModelRegistry
 from hades.ops.committee_runtime import COMMITTEE_STATUS_KEY, COMMITTEE_STATUS_NAMESPACE
 from hades.shared_kernel.cache import CacheService
+from hades.shared_kernel.logging import describe, get_logger
 from hades.shared_kernel.persistence.models.learning import (
     CommitteeDriftRecord,
     CommitteeFeatureImportanceRecord,
     CommitteeModelRecord,
     CommitteePredictionRecord,
 )
+
+_logger = get_logger("api.committee")
 
 router = APIRouter(prefix="/api/v1/committee", tags=["committee"])
 
@@ -89,7 +92,8 @@ async def feature_importance(
                 .order_by(desc(CommitteeFeatureImportanceRecord.computed_at))
                 .limit(1)
             )
-    except Exception:
+    except Exception as exc:
+        _logger.warning("api_query_failed", endpoint="feature_importance", error=describe(exc))
         return {"model_id": model_id, "importance": None}
     if row is None:
         return {"model_id": model_id, "importance": None}
@@ -221,7 +225,8 @@ async def _live_status(container: Container) -> dict[str, Any] | None:
     cache = CacheService(container.redis, namespace=COMMITTEE_STATUS_NAMESPACE)
     try:
         result = await cache.get(COMMITTEE_STATUS_KEY)
-    except Exception:  # dashboard must render even if Redis is down
+    except Exception as exc:  # dashboard must render even if Redis is down
+        _logger.warning("api_query_failed", endpoint="_live_status", error=describe(exc))
         return None
     return result if isinstance(result, dict) else None
 
@@ -245,7 +250,8 @@ async def _counts(container: Container) -> dict[str, Any]:
                 .select_from(CommitteePredictionRecord)
                 .where(CommitteePredictionRecord.shadow.is_(False))
             )
-    except Exception:  # never fail the endpoint on a DB hiccup
+    except Exception as exc:  # never fail the endpoint on a DB hiccup
+        _logger.warning("api_query_failed", endpoint="_counts", error=describe(exc))
         return empty
     return {
         "models_total": int(models_total or 0),
@@ -261,7 +267,8 @@ async def _rows(container: Container, stmt: Any) -> list[Any]:
     try:
         async with container.database.session() as session:
             return list((await session.scalars(stmt)).all())
-    except Exception:
+    except Exception as exc:
+        _logger.warning("api_query_failed", endpoint="_rows", error=describe(exc))
         return []
 
 
@@ -271,7 +278,8 @@ async def _one(container: Container, stmt: Any) -> Any:
     try:
         async with container.database.session() as session:
             return await session.scalar(stmt)
-    except Exception:
+    except Exception as exc:
+        _logger.warning("api_query_failed", endpoint="_one", error=describe(exc))
         return None
 
 
@@ -293,7 +301,13 @@ def _model_view(record: CommitteeModelRecord) -> dict[str, Any]:
 
 
 def _prediction_summary(record: CommitteePredictionRecord) -> dict[str, Any]:
-    explanation = (record.prediction or {}).get("explanation") or {}
+    payload = record.prediction or {}
+    explanation = payload.get("explanation") or {}
+    # What the platform already knew when it produced this verdict. A list of
+    # predictions where this is empty everywhere means the brain is judging every
+    # token from scratch — visible at a glance rather than after an audit.
+    enrichment = payload.get("enrichment") or {}
+    priors = enrichment.get("priors") or []
     return {
         "mint": record.mint,
         "symbol": record.symbol,
@@ -306,4 +320,9 @@ def _prediction_summary(record: CommitteePredictionRecord) -> dict[str, Any]:
         "feature_coverage": record.feature_coverage,
         "shadow": record.shadow,
         "headline": explanation.get("headline", ""),
+        "history_prior": enrichment.get("prior_log_odds", 0.0),
+        "history_samples": sum(int(p.get("samples", 0)) for p in priors),
+        "history_dimensions": [
+            p.get("dimension") for p in priors if p.get("samples") and p.get("strength")
+        ],
     }

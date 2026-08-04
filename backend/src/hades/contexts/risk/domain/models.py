@@ -66,6 +66,7 @@ class RiskRejectReason(StrEnum):
     DEVELOPER_RISKY = "developer_risky"
     WALLET_SUSPICIOUS = "wallet_suspicious"
     LIQUIDITY_INSUFFICIENT = "liquidity_insufficient"
+    ENSEMBLE_DISAGREES = "ensemble_disagrees"
     # Portfolio-level limits.
     MAX_POSITIONS = "max_positions"
     INSUFFICIENT_CAPITAL = "insufficient_capital"
@@ -394,6 +395,14 @@ class RiskCandidate(ValueObject):
     wallet_risk_score: float = 50.0
     liquidity_score: float = 50.0
     liquidity_usd: float = 0.0
+    # Strategy Engine consensus, when the roster has actually spoken for this
+    # token. ``ensemble_participating == 0`` means "no opinion recorded", which
+    # is different from "the strategies dislike it" and must never be read as a
+    # veto — an absent opinion is not a negative one.
+    ensemble_decision: str = "unknown"
+    ensemble_score: float = 0.0
+    ensemble_confidence: float = 0.0
+    ensemble_participating: int = 0
     # Concentration tags.
     strategy: str = "default"
     developer: str | None = None
@@ -425,6 +434,45 @@ class SizingDecision(ValueObject):
     risk_amount_usd: float = 0.0  # capital at risk if the stop is hit
     factors: dict[str, float] = Field(default_factory=dict)
     detail: str = ""
+
+
+class ExplorationGrant(ValueObject):
+    """Permission to judge a candidate under *exploration* rules, at a tiny size.
+
+    A grant is the Exploration context's answer to a single question the Risk
+    Manager asks it: "the conviction gate vetoed this one — is it worth a
+    fixed-size sample anyway, on the exploration budget?" It is the weakest thing
+    a collaborator can hand the guardian:
+
+    * It waives **exactly one named policy**, and only ever one from the
+      conviction tuple. Safety rules are not in that tuple and there is no field
+      here that could name one.
+    * It carries a size the Risk Manager must use *instead of* its own sizing,
+      never in addition to it. Exploration does not scale with conviction, which
+      is the entire point: the size is fixed so the budget states, in advance,
+      how many samples it can buy.
+    * It authorises nothing. Every allocation rule still runs afterwards — the
+      book's capital, exposure, correlation, drawdown and rate limits are as
+      binding for an exploration trade as for any other — and the Risk Manager
+      remains the only component that can approve.
+
+    The prose fields are not decoration. A trade taken to answer a question has
+    to be able to state, months later, which question and on what arithmetic;
+    they travel into the assessment, the audit store and permanent memory.
+    """
+
+    notional_usd: float
+    stop_loss_pct: float
+    take_profit_pct: float
+    #: The single conviction policy this grant waives, by name.
+    waived_policy: str
+    #: The cohort whose thin sample justified the trade (``None`` = the global
+    #: population, for a candidate with no attribution).
+    cohort_key: str | None = None
+    cohort_count: int = 0
+    evidence_summary: str = ""
+    budget_summary: str = ""
+    reasons: tuple[str, ...] = ()
 
 
 class PolicyOutcome(ValueObject):
@@ -465,6 +513,15 @@ class RiskAssessment(ValueObject):
     kill_switch_level: int = 0
     circuit_breaker_open: bool = False
     correlation_id: str | None = None
+    #: Set when this decision was taken under the exploration programme. Kept on
+    #: the assessment (and therefore in the audit store) because a trade sized
+    #: for evidence rather than for edge must never be readable, afterwards, as
+    #: an ordinary conviction trade that happened to be small.
+    exploration: ExplorationGrant | None = None
+
+    @property
+    def is_exploration(self) -> bool:
+        return self.exploration is not None
 
     @property
     def approved(self) -> bool:
@@ -548,6 +605,10 @@ class RiskSnapshot(ValueObject):
     consecutive_losses: int = 0
     approvals_session: int = 0
     rejections_session: int = 0
+    #: How many of ``approvals_session`` were exploration samples. Reported
+    #: separately so a dashboard never presents "12 approvals" without the fact
+    #: that eleven of them were dollar-sized evidence purchases.
+    exploration_approvals_session: int = 0
 
 
 class RiskConfig(ValueObject):
@@ -564,6 +625,12 @@ class RiskConfig(ValueObject):
     min_developer_score: float = 40.0
     max_wallet_risk: float = 70.0
     min_liquidity_usd: float = 5_000.0
+    #: Whether the Strategy Engine's ensemble may veto an entry. Off by default:
+    #: turning it on is a deliberate change of posture, and the flag existed for
+    #: a long time reading nothing at all.
+    gate_on_ensemble: bool = False
+    #: Minimum ensemble conviction, in [-1, 1], for a BUY consensus to stand.
+    min_ensemble_score: float = 0.0
 
 
 class RiskControlState(ValueObject):

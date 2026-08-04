@@ -105,6 +105,24 @@ class EventBusSettings(_Section):
 
     transport: EventBusTransport = EventBusTransport.REDIS
     stream_prefix: str = "hades.events"
+    #: Approximate cap on the event stream. Without it the stream grows forever:
+    #: a live deployment reached 172k entries and 155 MB of Redis with no
+    #: `maxmemory` set, which ends as an eviction or an OOM rather than as a
+    #: warning. ``~`` trimming lets Redis drop whole nodes, so it is cheap.
+    stream_max_len: int = 250_000
+    #: Consumer lag (undelivered entries) above which the bus logs a warning.
+    #: A backlogged consumer is the most dangerous silent state this platform has:
+    #: every component reports healthy while the decision path judges tokens from
+    #: hours ago. One deployment ran 59 hours behind and nothing said so.
+    lag_warn_threshold: int = 5_000
+    #: How often the consumer checks its own lag, in seconds.
+    lag_check_interval_seconds: float = 60.0
+    #: How long a delivered-but-unacked message may sit before another consumer
+    #: takes it over. A container killed mid-dispatch leaves its in-flight
+    #: messages assigned to a consumer name that will never ack them, and nothing
+    #: redelivers those on its own — `XREADGROUP >` returns only new entries.
+    #: One deployment had accumulated 765 such orphans across restarts.
+    reclaim_after_seconds: float = 300.0
 
 
 class ClickHouseSettings(_Section):
@@ -303,6 +321,13 @@ class SecuritySettings(_Section):
     fetch_holder_count: bool = False  # getProgramAccounts scan — off by default
     honeypot_enabled: bool = True
     honeypot_probe_usd: float = 50.0
+    # The honeypot probe's quote route. Configurable because a third party can
+    # retire an endpoint at any time, and when this one dies *every* token fails
+    # its sellability check and nothing can ever be approved — that must be
+    # fixable by an operator editing .env, not by cutting a release. The literal
+    # is repeated from ``security.infrastructure.swap_simulator`` rather than
+    # imported: shared_kernel must not depend on a context.
+    honeypot_quote_url: str = "https://lite-api.jup.ag/swap/v1/quote"
     cluster_live_lookups: bool = True  # bounded funding-graph RPC lookups
     cluster_max_holders: int = 12
     cluster_min_members: int = 3
@@ -476,6 +501,11 @@ class NotificationSettings(_Section):
     retry_attempts: int = 3
     rate_limit_per_minute: int = 30
     timeout_seconds: int = 10
+    #: How long an identical alert is suppressed after being delivered. The same
+    #: situation re-detected on every probe tick is one situation, not news
+    #: repeated every few seconds — and an operator who learns the channel is
+    #: noise stops reading the alert that matters. Set to 0 to disable.
+    dedup_window_seconds: float = 300.0
 
 
 class WatchdogSettings(_Section):
@@ -498,6 +528,12 @@ class WatchdogSettings(_Section):
     # Liveness files written by background services; the healthcheck reads them.
     liveness_dir: str = "/var/run/hades"
     liveness_max_age_seconds: int = 60
+    #: How long a consumer group may go without touching the event stream before
+    #: the Watchdog calls it unhealthy. A live consumer blocks for at most a
+    #: couple of seconds per read, so anything past a few minutes means the loop
+    #: is gone — the Worker's once sat idle for four days while every other probe
+    #: stayed green.
+    event_bus_max_idle_seconds: float = 300.0
 
     @property
     def watched_role_list(self) -> list[str]:
@@ -593,6 +629,131 @@ class LearningSettings(_Section):
     # Confidence priors used before enough history accrues (0..1).
     default_dataset_quality: float = 0.5
     default_sample_support: float = 0.35
+    # --- Candidate Enricher --------------------------------------------------
+    # Every candidate is enriched from the Knowledge Engine before the committee
+    # sees it. These knobs bound the work and the influence; none of them can
+    # relax a threshold — with an empty memory the enrichment is exactly neutral
+    # and the committee produces the number it would have produced anyway.
+    #: Settled lessons considered per enrichment pass.
+    enrichment_lesson_window: int = 5_000
+    #: Seconds the lesson set is cached. Lessons arrive as trades settle; tokens
+    #: arrive as the Scanner discovers them, which is orders of magnitude faster.
+    enrichment_cache_seconds: float = 60.0
+    #: Hard cap on how far history may shift the fused probabilities, in logits.
+    #: History informs the committee; it must never overrule the token in front
+    #: of it, because what a memory cannot know is what has changed since.
+    enrichment_max_prior_log_odds: float = 1.0
+    #: Pseudo-count pulling every cohort rate toward 0.5 (higher = more sceptical).
+    enrichment_shrinkage: float = 8.0
+    #: Cohort size below which a prior is reported but contributes nothing.
+    enrichment_min_cohort: int = 3
+    #: Comparable examples at which per-candidate ``sample_support`` saturates.
+    enrichment_support_target: int = 60
+    #: Size of the "similar past patterns" neighbourhood.
+    enrichment_neighbours: int = 25
+
+
+class KnowledgeSettings(_Section):
+    """Knowledge — the platform's permanent, verifiable memory.
+
+    It records what every other context learns and, crucially, pairs each
+    decision with its realised outcome so the AI Committee finally has
+    ground-truth training samples. It takes no decision, sizes nothing and has no
+    concept of an order or a position.
+
+    ``feed_committee`` is the switch that closes the learning loop: with it on,
+    a completed lesson is written to the committee's outcome ledger. It defaults
+    **on** because a memory that never reaches the brain is the defect this
+    context was built to fix, and an operator who wants the memory without the
+    learning can still say so.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="KNOWLEDGE_", extra="ignore", env_file=".env")
+
+    enabled: bool = True
+    #: Forward completed lessons to the AI Committee's outcome ledger.
+    feed_committee: bool = True
+    #: Announce every accepted observation on the bus. Off: the Scanner is a
+    #: firehose and nothing subscribes, so this is thousands of messages an hour
+    #: consumed by no one.
+    announce_observations: bool = False
+    #: Retention floor for the read API's default query window, in days. The
+    #: store itself is append-only and never trimmed here.
+    default_query_days: int = 30
+    #: Inbox for ``hades.knowledge/v1`` bundles produced by the external Hades
+    #: Research Lab. Ingestion is a **pull**: with nobody sweeping, a bundle on
+    #: disk does nothing. See docs/RESEARCH_LAB_BRIDGE.md.
+    inbox: str = "/app/research/knowledge-inbox"
+    #: Sweep the inbox automatically on the research runtime's schedule. Off by
+    #: default — importing external material should be a deliberate act until an
+    #: operator has decided they trust the producer feeding that directory.
+    auto_ingest: bool = False
+
+
+class ExplorationSettings(_Section):
+    """Exploration — the budgeted, self-terminating answer to the cold start.
+
+    This section does not exist to make money. It exists to buy the platform its
+    first ground-truth samples, at a price fixed here in advance, during the only
+    period in which the memory has none. Everything about it is a ceiling.
+
+    It is **off by default** and stays off until an operator sets a budget they
+    are content to lose, because that is what the programme spends it on: the
+    trades are chosen for what they will teach, not for their expected return.
+
+    Three properties are worth knowing before turning it on:
+
+    * It waives **only** the AI Committee's conviction gates (probability and
+      confidence). Every safety rule — security, developer, wallet, liquidity,
+      kill switch, circuit breaker, drawdown, exposure, capital — applies in full
+      and unchanged, and the Risk Manager remains the sole authoriser.
+    * It **switches itself off**. When the memory holds ``target_lessons``
+      settled trades with at least ``target_per_class`` on each side of zero, the
+      programme latches off and announces it. No operator action is required for
+      it to end.
+    * Its size is **fixed**, not conviction-weighted: every exploration trade
+      costs ``per_trade_usd``, so ``total_budget_usd`` states exactly how many
+      trades the programme can ever fund.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="EXPLORATION_", extra="ignore", env_file=".env")
+
+    enabled: bool = False
+    # -- the budget (four independent ceilings) --------------------------------
+    #: Fixed size of every exploration trade. Deliberately not a maximum: a size
+    #: that grew with conviction would reintroduce the belief the programme
+    #: exists to test.
+    per_trade_usd: float = 1.0
+    daily_budget_usd: float = 10.0
+    weekly_budget_usd: float = 40.0
+    #: Lifetime ceiling. This one never resets, and it is the number that bounds
+    #: what the whole programme can cost.
+    total_budget_usd: float = 250.0
+    max_trades_per_day: int = 10
+    max_trades_per_week: int = 40
+    # -- when it stops ---------------------------------------------------------
+    target_lessons: int = 60
+    #: Minimum settled trades on *each* side of zero. Not redundant with the
+    #: total: 60 lessons that are all losses are a single-class dataset, whose
+    #: AUC is undefined and against which no model can be validated.
+    target_per_class: int = 15
+    #: Settled lessons at which a cohort (developer / launchpad / narrative /
+    #: cluster) stops being worth sampling. Drives selection, not shutdown.
+    cohort_target: int = 8
+    # -- which candidates it samples -------------------------------------------
+    #: Floor: below this the candidate is not an open question, it is a bad one.
+    min_prob_roi_positive: float = 0.35
+    #: Ceiling: above this the production path judges the candidate on its own,
+    #: and spending exploration budget there would flatter the programme with a
+    #: trade the platform was going to make anyway.
+    max_prob_roi_positive: float = 0.55
+    min_confidence: float = 0.15
+    # -- the risk envelope of an exploration trade -----------------------------
+    #: Tighter than production by default: the point is to learn what happens,
+    #: and a wide stop turns a cheap question into an expensive one.
+    stop_loss_pct: float = 12.0
+    take_profit_pct: float = 30.0
+    status_interval_seconds: float = 10.0
 
 
 class ResearchSettings(_Section):
@@ -640,10 +801,22 @@ class StrategySettings(_Section):
     ensemble fusion and lets operators enable/disable strategies and pass
     per-strategy parameters entirely from configuration (never by editing code).
 
-    ``gate_risk`` is a forward-looking flag: when the ensemble is wired to gate the
-    Risk Manager it is honoured there. It defaults off so the existing
-    committee->risk path is unchanged — the engine is advisory until explicitly
-    promoted, exactly like every other capability in Hades.
+    ``gate_risk`` is no longer forward-looking: it is the single switch that
+    makes the Strategy Engine *decide*. With it on, the ensemble can
+
+      * **veto an entry** the Risk Manager would otherwise approve
+        (``EnsembleConsensusPolicy``, in the conviction tier), and
+      * **request an exit** on a token already held, honoured by the Position
+        Monitor on its next priced tick.
+
+    Both directions only ever reduce exposure. The ensemble can never create an
+    approval or open a position: the Risk Manager remains the sole authoriser and
+    ``TradeApproved`` is still constructed in exactly one place.
+
+    It defaults off. Turning it on changes what the platform trades, so it is a
+    deliberate act — and note that a silent roster is not a dissenting one: with
+    no strategy participating the policy passes, because reading silence as a
+    veto would halt the platform at cold start while looking like caution.
     """
 
     model_config = SettingsConfigDict(env_prefix="STRATEGY_", extra="ignore", env_file=".env")
@@ -665,8 +838,12 @@ class StrategySettings(_Section):
     # JSON object of per-strategy parameter overrides:
     #   {"momentum_breakout": {"sensitivity": 1.2}, "launch_detection": {...}}
     params_json: str = Field(default="", alias="STRATEGY_PARAMS")
-    # Forward-looking: let the ensemble gate the Risk Manager (default off).
+    # The single switch that lets the ensemble veto entries and request exits.
     gate_risk: bool = False
+    #: Minimum ensemble conviction in [-1, 1] for a BUY consensus to stand when
+    #: ``gate_risk`` is on. 0.0 means "any positive net conviction will do"; the
+    #: deadband above already filters noise around zero.
+    gate_min_ensemble_score: float = 0.0
     status_interval_seconds: float = 5.0
 
     @property
@@ -793,6 +970,8 @@ class Settings(BaseSettings):
     feature: FeatureSettings = Field(default_factory=FeatureSettings)
     learning: LearningSettings = Field(default_factory=LearningSettings)
     research: ResearchSettings = Field(default_factory=ResearchSettings)
+    knowledge: KnowledgeSettings = Field(default_factory=KnowledgeSettings)
+    exploration: ExplorationSettings = Field(default_factory=ExplorationSettings)
     intelligence: IntelligenceSettings = Field(default_factory=IntelligenceSettings)
     strategy: StrategySettings = Field(default_factory=StrategySettings)
     timeouts: TimeoutSettings = Field(default_factory=TimeoutSettings)

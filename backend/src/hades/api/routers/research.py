@@ -23,6 +23,7 @@ from hades.api.dependencies import get_container
 from hades.bootstrap import Container
 from hades.ops.research_runtime import RESEARCH_STATUS_KEY, RESEARCH_STATUS_NAMESPACE
 from hades.shared_kernel.cache import CacheService
+from hades.shared_kernel.logging import describe, get_logger
 from hades.shared_kernel.persistence.models.research import (
     ResearchBacktestRecord,
     ResearchCandidateRecord,
@@ -34,6 +35,8 @@ from hades.shared_kernel.persistence.models.research import (
     ResearchShadowRecord,
 )
 
+_logger = get_logger("api.research")
+
 router = APIRouter(prefix="/api/v1/research", tags=["research"])
 
 
@@ -42,11 +45,35 @@ async def research_status(container: Container = Depends(get_container)) -> dict
     live = await _live_status(container)
     counts = await _counts(container)
     return {
-        "lab_enabled": container.settings.research.lab_enabled,
+        "lab_enabled": _lab_enabled(container, live),
         "running": live is not None,
         **counts,
         "live": live or {},
     }
+
+
+def _lab_enabled(container: Container, live: dict[str, Any] | None) -> bool:
+    """Whether the lab is enabled, according to the process that would host it.
+
+    The Worker hosts the lab; the API only reports on it. Both load ``.env``
+    independently, so reading this from the API's own settings describes the API
+    container's configuration rather than the lab's. Enabling
+    ``RESEARCH_LAB_ENABLED`` and restarting only the Worker then produced a
+    response that contradicted itself — ``lab_enabled: false`` beside
+    ``running: true`` and a ``live`` payload full of shadow strategies — and the
+    dashboard faithfully rendered "Disabled" over a lab that was demonstrably
+    working.
+
+    The snapshot carries the Worker's own view, so prefer it whenever the Worker
+    is reporting. Fall back to local settings only when there is no snapshot,
+    where it is the sole evidence available and answers the question an operator
+    is really asking: is this switched on at all?
+    """
+    if live is not None:
+        reported = live.get("lab_enabled")
+        if isinstance(reported, bool):
+            return reported
+    return bool(container.settings.research.lab_enabled)
 
 
 @router.get("/experiments", summary="Recent experiments")
@@ -270,6 +297,38 @@ async def promote_candidate(
     )
     if row is None:
         raise HTTPException(status_code=404, detail="candidate not found")
+
+    # The response used to claim "recorded" while writing nothing, so the
+    # Promotion decisions panel stayed empty forever and a governance decision
+    # left no trace. Persist it before saying it happened.
+    record = ResearchPromotionRecord(
+        candidate_id=candidate_id,
+        candidate_name=row.name,
+        kind="manual",
+        outcome="approved",
+        manual_approved=True,
+        rationale="Recorded from the dashboard by a human operator.",
+        payload={
+            "candidate_id": candidate_id,
+            "name": row.name,
+            "archetype": row.archetype,
+            "version": row.version,
+            "stage": row.stage,
+            "source": "dashboard",
+        },
+    )
+    if container.database is None:
+        raise HTTPException(
+            status_code=503, detail="promotion cannot be recorded: no database configured"
+        )
+    try:
+        async with container.database.session() as session:
+            session.add(record)
+    except Exception as exc:  # never claim success on a failed write
+        raise HTTPException(
+            status_code=500, detail=f"promotion could not be recorded: {exc}"
+        ) from exc
+
     return {
         "candidate_id": candidate_id,
         "name": row.name,
@@ -288,7 +347,8 @@ async def _live_status(container: Container) -> dict[str, Any] | None:
     cache = CacheService(container.redis, namespace=RESEARCH_STATUS_NAMESPACE)
     try:
         result = await cache.get(RESEARCH_STATUS_KEY)
-    except Exception:  # dashboard must render even if Redis is down
+    except Exception as exc:  # dashboard must render even if Redis is down
+        _logger.warning("api_query_failed", endpoint="_live_status", error=describe(exc))
         return None
     return result if isinstance(result, dict) else None
 
@@ -320,7 +380,8 @@ async def _counts(container: Container) -> dict[str, Any]:
             knowledge_total = await session.scalar(
                 select(func.count()).select_from(ResearchKnowledgeRecord)
             )
-    except Exception:  # never fail the endpoint on a DB hiccup
+    except Exception as exc:  # never fail the endpoint on a DB hiccup
+        _logger.warning("api_query_failed", endpoint="_counts", error=describe(exc))
         return empty
     return {
         "experiments_total": int(experiments_total or 0),
@@ -337,7 +398,8 @@ async def _rows(container: Container, stmt: Any) -> list[Any]:
     try:
         async with container.database.session() as session:
             return list((await session.scalars(stmt)).all())
-    except Exception:
+    except Exception as exc:
+        _logger.warning("api_query_failed", endpoint="_rows", error=describe(exc))
         return []
 
 
@@ -347,5 +409,6 @@ async def _one(container: Container, stmt: Any) -> Any:
     try:
         async with container.database.session() as session:
             return await session.scalar(stmt)
-    except Exception:
+    except Exception as exc:
+        _logger.warning("api_query_failed", endpoint="_one", error=describe(exc))
         return None

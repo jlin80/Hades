@@ -20,7 +20,10 @@ from hades.contexts.learning.domain.models import (
     Dataset,
     DecisionContext,
     DriftReport,
+    EnrichedCandidate,
     FeatureImportance,
+    HistoricalLesson,
+    HistoricalRecord,
     ModelCard,
     TrainingSample,
 )
@@ -48,6 +51,44 @@ class DecisionContextBuilder(Protocol):
     """
 
     async def build(self, event: WalletIntelligenceComputed) -> DecisionContext | None: ...
+
+
+@runtime_checkable
+class CandidateHistoryPort(Protocol):
+    """Reads what the platform already knows, for enrichment.
+
+    This is a **narrow read port the Learning context declares itself** — the
+    sanctioned way to depend on another context's knowledge without importing
+    its application or infrastructure. It returns Learning's own value objects,
+    so the committee never learns the memory's storage vocabulary and the
+    enricher can be exercised with a list of lessons and no database.
+
+    Both methods are read-only and best-effort by contract: an adapter that
+    cannot reach the memory returns nothing. Enrichment degrades to "consulted,
+    found nothing" — never to an exception that would stop a token being judged,
+    and never to a fabricated prior.
+    """
+
+    async def lessons(self, *, limit: int = 5_000) -> tuple[HistoricalLesson, ...]:
+        """Settled decisions, newest last. The only ground truth there is."""
+        ...
+
+    async def observations(self, subject: str, *, limit: int = 50) -> tuple[HistoricalRecord, ...]:
+        """What the memory holds about one subject (a mint, a wallet, a dev)."""
+        ...
+
+
+@runtime_checkable
+class CandidateEnricher(Protocol):
+    """Turns a bare decision context into an :class:`EnrichedCandidate`.
+
+    Declared as a port so the committee's handler depends on the contract and
+    the composition root supplies the implementation — and so the requirement
+    "no candidate reaches the committee unenriched" is expressible as a type,
+    not as a convention someone has to remember.
+    """
+
+    async def enrich(self, context: DecisionContext) -> EnrichedCandidate: ...
 
 
 @runtime_checkable

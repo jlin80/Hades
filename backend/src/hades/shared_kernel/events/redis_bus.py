@@ -19,6 +19,7 @@ that owns the bus (worker / engine / watchdog / notification / scheduler).
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any
 
 import orjson
@@ -45,6 +46,10 @@ class RedisEventBus:
         consumer: str = "consumer-1",
         block_ms: int = 2000,
         batch: int = 50,
+        max_len: int = 250_000,
+        lag_warn_threshold: int = 5_000,
+        lag_check_interval_seconds: float = 60.0,
+        reclaim_after_seconds: float = 300.0,
     ) -> None:
         self._provider = provider
         self._registry = registry
@@ -56,6 +61,31 @@ class RedisEventBus:
         self._handlers: dict[str, list[EventHandler]] = {}
         self._stop = asyncio.Event()
         self._group_ready = False
+        self._max_len = max(1_000, max_len)
+        self._lag_warn = max(1, lag_warn_threshold)
+        self._lag_interval = max(5.0, lag_check_interval_seconds)
+        self._last_lag_check = 0.0
+        # How long a delivered-but-unacked message may sit before another
+        # consumer takes it over. Comfortably longer than any handler chain,
+        # short enough that a crashed process does not strand work for a day.
+        self._reclaim_after_ms = int(max(30.0, reclaim_after_seconds) * 1000)
+        self._reclaim_cursor = "0-0"
+        # Wall-clock of the last completed read cycle. A consumer loop that has
+        # stopped turning is indistinguishable from an idle one unless something
+        # records that it turned; this is that record, and `/health` reads it.
+        self._last_cycle_at: float | None = None
+
+    @property
+    def last_cycle_at(self) -> float | None:
+        """Unix time of the last completed consume cycle, or ``None`` if never.
+
+        The consumer loop is a bare ``asyncio`` task inside a process whose
+        health is measured by a liveness file the *main* coroutine touches. So
+        the loop can die while every probe stays green — which is exactly what
+        happened. Exposing the last turn of the loop lets a probe assert the bus
+        is consuming rather than assume it.
+        """
+        return self._last_cycle_at
 
     # --- EventBus interface ---------------------------------------------------
     def subscribe(self, event_type: str, handler: EventHandler) -> None:
@@ -64,9 +94,18 @@ class RedisEventBus:
 
     async def publish(self, event: DomainEvent) -> None:
         envelope = event.to_envelope()
+        # ``maxlen`` with ``approximate`` is what keeps the stream bounded. Without
+        # it the stream grows for as long as the platform runs: a live deployment
+        # reached 172k entries and 155 MB of Redis with no ``maxmemory`` set, which
+        # ends in an eviction or an OOM rather than in a warning. Approximate
+        # trimming lets Redis drop whole radix nodes, so the cost per publish is
+        # negligible — and the cap is far above any consumer's working set, so a
+        # briefly-behind consumer is never trimmed out from under it.
         await self._provider.client().xadd(
             self._stream,
             {"type": event.event_type, "data": orjson.dumps(envelope).decode()},
+            maxlen=self._max_len,
+            approximate=True,
         )
 
     async def publish_many(self, events: list[DomainEvent]) -> None:
@@ -87,31 +126,188 @@ class RedisEventBus:
         self._group_ready = True
 
     async def run(self) -> None:
-        """Consume the stream and dispatch to handlers until :meth:`stop`."""
+        """Consume the stream and dispatch to handlers until :meth:`stop`.
+
+        **Nothing inside this loop may end it.** That is not defensive style, it
+        is the lesson of a four-day outage: the loop logged ``redis_bus_consuming``
+        once, ran for thirty minutes, and stopped — with no error, no traceback
+        and no restart. Every container stayed healthy, the dashboard stayed
+        green, and the entire decision path simply stopped receiving events while
+        the stream kept growing to its 250,000-entry cap.
+
+        It went unseen because of how the failure composes. Only the
+        ``xreadgroup`` call was guarded, so anything raised further down —
+        rebuilding an envelope into a typed event, an ``XACK`` on a dropped
+        connection — escaped the ``while`` and returned from ``run``. The task is
+        held in ``ServiceProcess._tasks`` and never awaited, so asyncio's
+        "Task exception was never retrieved" warning never fires either: that
+        warning comes from the task's ``__del__``, and a referenced task is never
+        collected. The exception had nowhere to be seen.
+
+        So the guard now wraps the *whole* cycle. A poisonous message costs one
+        error line and the loop keeps turning; a broken connection costs a second
+        of backoff. Recording ``_last_cycle_at`` on every turn is the other half:
+        a loop that stops turning must become visible to ``/health``, because
+        this failure proved that "the process is alive" says nothing about
+        whether it is still listening.
+        """
         await self._ensure_group()
-        client = self._provider.client()
         _logger.info("redis_bus_consuming", stream=self._stream, group=self._group)
         while not self._stop.is_set():
             try:
-                response = await client.xreadgroup(
-                    self._group,
-                    self._consumer,
-                    {self._stream: ">"},
-                    count=self._batch,
-                    block=self._block_ms,
+                await self._consume_once()
+            except asyncio.CancelledError:  # shutdown — the only way out
+                raise
+            except Exception as exc:  # nothing else may end this loop
+                _logger.error(
+                    "redis_bus_cycle_failed",
+                    group=self._group,
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                    note="consume cycle raised; the loop continues after a backoff",
+                    exc_info=True,
                 )
-            except Exception as exc:  # keep the loop alive on transient errors
-                _logger.warning("redis_bus_read_failed", error=str(exc))
                 await asyncio.sleep(1.0)
+
+    async def _consume_once(self) -> None:
+        """One read → dispatch → ack cycle. Raises only to :meth:`run`'s guard."""
+        client = self._provider.client()
+        response = await client.xreadgroup(
+            self._group,
+            self._consumer,
+            {self._stream: ">"},
+            count=self._batch,
+            block=self._block_ms,
+        )
+        self._last_cycle_at = time.time()
+        await self._check_lag()
+        await self._reclaim_stale()
+        if not response:
+            return
+        for _stream, messages in response:
+            for message_id, fields in messages:
+                await self._dispatch(fields)
+                await client.xack(  # type: ignore[no-untyped-call]
+                    self._stream, self._group, message_id
+                )
+
+    async def _reclaim_stale(self) -> None:
+        """Take over messages a previous consumer was delivered and never acked.
+
+        A consumer group's ``pending`` list is per-consumer, and the consumer name
+        is this process's stable instance id. So a container killed mid-dispatch —
+        a deploy, an OOM, a `docker compose up` that recreates it — leaves its
+        in-flight messages delivered to a name that will never ack them. Nothing
+        redelivers those on its own: ``XREADGROUP >`` only ever returns *new*
+        entries. They simply stop existing as far as the platform is concerned.
+
+        The live deployment carried 765 such messages, accumulated across
+        restarts, and they were invisible: the events had been published, the
+        stream still held them, and no handler had run. A gap in the middle of a
+        history that looks complete is worse than a gap you can see.
+
+        ``XAUTOCLAIM`` is exactly the right primitive: it hands us any message
+        idle longer than the threshold, we dispatch and ack it normally, and the
+        cursor walks the pending list across calls. Handlers are already required
+        to be idempotent — the bus has always been at-least-once — so a reclaim
+        that duplicates work is safe by contract.
+        """
+        try:
+            result = await self._provider.client().xautoclaim(
+                self._stream,
+                self._group,
+                self._consumer,
+                min_idle_time=self._reclaim_after_ms,
+                start_id=self._reclaim_cursor,
+                count=self._batch,
+            )
+        except Exception as exc:  # reclaiming is best-effort, never fatal
+            _logger.debug("redis_bus_reclaim_failed", error=str(exc))
+            return
+
+        # redis-py returns (next_cursor, claimed[, deleted]) depending on version.
+        if not isinstance(result, (list, tuple)) or len(result) < 2:
+            return
+        self._reclaim_cursor = str(result[0]) if result[0] else "0-0"
+        claimed = result[1] or []
+        if not claimed:
+            return
+
+        _logger.warning(
+            "redis_bus_reclaimed",
+            group=self._group,
+            count=len(claimed),
+            idle_ms=self._reclaim_after_ms,
+            note="messages a previous consumer never acked; replaying them now",
+        )
+        client = self._provider.client()
+        for message_id, fields in claimed:
+            if not fields:
+                # The message is in the pending list but no longer in the stream:
+                # `MAXLEN` trimmed it away while it sat unacked. Redis hands these
+                # back with empty fields, and dispatching one used to raise on
+                # `fields.get(...)` and take the whole consumer loop with it —
+                # which is how the reclaim added in the previous commit became a
+                # *new* way for the Worker to stop consuming a few minutes after
+                # every restart. There is nothing to replay; the entry is gone.
+                # Ack it so it leaves the pending list instead of being reclaimed
+                # forever.
+                _logger.warning(
+                    "redis_bus_reclaimed_message_gone",
+                    group=self._group,
+                    message_id=str(message_id),
+                    note="pending entry was trimmed from the stream; acking to drop it",
+                )
+                await client.xack(self._stream, self._group, message_id)  # type: ignore[no-untyped-call]
                 continue
-            if not response:
+            await self._dispatch(fields)
+            await client.xack(self._stream, self._group, message_id)  # type: ignore[no-untyped-call]
+
+    async def _check_lag(self) -> None:
+        """Warn when this consumer group falls behind the stream.
+
+        A backlogged consumer is the most dangerous silent state this platform
+        has. One deployment ran **59 hours** behind: the decision path was
+        judging tokens from two days earlier, the portfolio's mark-to-market
+        events had not been reached so its unrealised PnL sat at exactly zero,
+        and every container reported healthy the whole time. Nothing anywhere
+        measured the gap, so the only evidence was a number nobody was reading.
+
+        Cheap by construction: one ``XINFO GROUPS`` per interval, and any failure
+        is swallowed — observability must never be able to stall the bus it
+        observes.
+        """
+        now = time.monotonic()
+        if now - self._last_lag_check < self._lag_interval:
+            return
+        self._last_lag_check = now
+        try:
+            groups = await self._provider.client().xinfo_groups(  # type: ignore[no-untyped-call]
+                self._stream
+            )
+        except Exception as exc:  # never let the watchdog break the thing watched
+            _logger.debug("redis_bus_lag_check_failed", error=str(exc))
+            return
+        for group in groups:
+            if group.get("name") != self._group:
                 continue
-            for _stream, messages in response:
-                for message_id, fields in messages:
-                    await self._dispatch(fields)
-                    await client.xack(  # type: ignore[no-untyped-call]
-                        self._stream, self._group, message_id
-                    )
+            lag = group.get("lag")
+            pending = group.get("pending", 0)
+            if isinstance(lag, int) and lag > self._lag_warn:
+                _logger.error(
+                    "redis_bus_consumer_behind",
+                    group=self._group,
+                    lag=lag,
+                    pending=pending,
+                    threshold=self._lag_warn,
+                    note=(
+                        "this service is processing stale events; anything it decides "
+                        "is based on the past, and it will look healthy while doing so"
+                    ),
+                )
+            else:
+                _logger.debug("redis_bus_lag", group=self._group, lag=lag, pending=pending)
+            return
 
     async def _dispatch(self, fields: dict[str, Any]) -> None:
         event_type = fields.get("type", "")
@@ -123,7 +319,16 @@ class RedisEventBus:
         except Exception as exc:
             _logger.error("redis_bus_bad_envelope", error=str(exc))
             return
-        event = self._registry.rebuild(envelope)
+        try:
+            event = self._registry.rebuild(envelope)
+        except Exception as exc:
+            # A published envelope whose schema no longer validates is a bad
+            # message, not a bad bus. Report it and let the caller ack it, so one
+            # unparseable event cannot wedge the group behind it forever.
+            _logger.error(
+                "redis_bus_rebuild_failed", event_type=event_type, error=str(exc)
+            )
+            return
         if event is None:
             _logger.debug("redis_bus_unknown_event", event_type=event_type)
             return

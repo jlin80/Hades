@@ -139,6 +139,65 @@ export interface EquityPoint {
   equity_usd: number;
 }
 
+// --- Risk: the defence layer -------------------------------------------------
+
+export interface RiskLive {
+  enabled?: boolean;
+  kill_switch_level?: number;
+  kill_switch_label?: string;
+  kill_switch_reason?: string;
+  circuit_breaker_open?: boolean;
+  circuit_breaker_reasons?: string[];
+  emergency_mode?: boolean;
+  open_positions?: number;
+  portfolio_exposure_pct?: number;
+  daily_loss_pct?: number;
+  drawdown_pct?: number;
+  consecutive_losses?: number;
+  [key: string]: unknown;
+}
+
+export interface RiskStatus {
+  enabled: boolean;
+  running: boolean;
+  approvals_total: number;
+  rejections_total: number;
+  live: RiskLive;
+}
+
+export interface DrawdownState {
+  drawdown_pct: number;
+  daily_loss_pct: number;
+  limits: Record<string, number>;
+}
+
+export interface ExposureState {
+  portfolio_exposure_pct: number;
+  open_positions: number;
+  caps: Record<string, number>;
+}
+
+export interface RiskDecision {
+  mint: string;
+  symbol: string | null;
+  decision: string;
+  reject_reason: string | null;
+  conviction: number | null;
+  notional_usd: number | null;
+  headline: string | null;
+  strategy: string | null;
+  at: string | null;
+}
+
+/** Wallet identity and health. Never carries key material — by design. */
+export interface WalletHealth {
+  configured: boolean;
+  public_key: string | null;
+  balance_sol: number;
+  healthy: boolean;
+  detail: string;
+}
+
 export interface ExecutionMetrics {
   mode?: string;
   is_live?: boolean;
@@ -147,11 +206,41 @@ export interface ExecutionMetrics {
   transaction_stats?: Record<string, number>;
 }
 
+export interface OpenPosition {
+  mint: string;
+  symbol: string | null;
+  name: string | null;
+  notional_usd: number;
+  unrealized_pnl_usd: number;
+  strategy: string;
+  regime: string;
+  opened_at: string | null;
+}
+
+// --- Pipeline funnel ---------------------------------------------------------
+
+export interface FunnelStage {
+  key: string;
+  label: string;
+  count: number;
+}
+
+export interface Funnel {
+  window_hours: number;
+  stages: FunnelStage[];
+  reject_reasons: Record<string, number>;
+  open_positions_now?: number;
+  diagnosis: string;
+}
+
 export interface AnomalyRow {
   subject: string;
   kind: string;
   field: string;
   detail: string;
+  /** How many times this exact problem recurred (one row per distinct problem). */
+  occurrences: number;
+  first_at: string | null;
   at: string | null;
 }
 
@@ -367,6 +456,104 @@ export interface DriftAlert {
   at: string | null;
 }
 
+// --- Research Lab ------------------------------------------------------------
+// The lab only ever *proposes*. Nothing on these screens deploys anything, and
+// a promotion is a recorded governance decision, never an activation.
+
+export interface ResearchStatus {
+  lab_enabled: boolean;
+  running: boolean;
+  experiments_total: number;
+  backtests_total: number;
+  candidates_total: number;
+  promotions_total: number;
+  knowledge_total: number;
+  live: {
+    shadow_strategies?: ShadowStrategy[];
+    /** Whether the recurring-study scheduler is on. Without it the lab runs but studies nothing. */
+    auto_research?: boolean;
+    /** Labelled outcomes available to study; studies defer below the configured minimum. */
+    historical_samples?: number;
+    [key: string]: unknown;
+  };
+}
+
+export interface ShadowStrategy {
+  name?: string;
+  expectancy?: number;
+  trades?: number;
+  win_rate?: number;
+  [key: string]: unknown;
+}
+
+export interface ResearchExperiment {
+  experiment_id: string;
+  name: string;
+  kind: string;
+  status: string;
+  hypothesis: string | null;
+  conclusion: string | null;
+  metrics: Record<string, unknown> | null;
+  at: string | null;
+}
+
+export interface ResearchBacktest {
+  backtest_id: string;
+  strategy: string;
+  total_return: number | null;
+  sharpe: number | null;
+  max_drawdown: number | null;
+  profit_factor: number | null;
+  trades: number | null;
+  at: string | null;
+}
+
+export interface ResearchCandidate {
+  candidate_id: string;
+  name: string;
+  archetype: string | null;
+  version: string | null;
+  stage: string;
+  payload: Record<string, unknown> | null;
+}
+
+export interface ResearchPromotion {
+  candidate_id: string;
+  candidate_name: string | null;
+  kind: string | null;
+  outcome: string;
+  manual_approved: boolean;
+  rationale: string | null;
+  at: string | null;
+}
+
+export interface ResearchKnowledgeEntry {
+  entry_id: string;
+  category: string;
+  title: string;
+  body: string | null;
+  data: Record<string, unknown> | null;
+  at: string | null;
+}
+
+export interface ResearchHypothesis {
+  hypothesis_id: string;
+  statement: string;
+  status: string;
+  rationale: string | null;
+  evidence: Record<string, unknown> | null;
+  at: string | null;
+}
+
+export interface ResearchReport {
+  report_id: string;
+  period: string | null;
+  title: string;
+  summary: string | null;
+  payload: Record<string, unknown> | null;
+  at: string | null;
+}
+
 async function get<T>(path: string): Promise<T> {
   const res = await fetch(`${BASE_URL}${path}`);
   if (!res.ok) throw new Error(`${path} -> ${res.status}`);
@@ -408,12 +595,35 @@ export const api = {
     get<{ anomalies: AnomalyRow[]; by_kind: Record<string, number> }>(
       "/api/v1/scanner/anomalies?limit=50",
     ),
+  funnel: () => get<Funnel>("/api/v1/funnel?hours=24"),
   portfolio: () => get<PortfolioStatus>("/api/v1/portfolio"),
+  portfolioPositions: () =>
+    get<{ positions: OpenPosition[]; open_positions: number; invested_usd: number }>(
+      "/api/v1/portfolio/positions",
+    ),
   portfolioCapital: () => get<PortfolioLive>("/api/v1/portfolio/capital"),
   portfolioPnl: () => get<{ pnl: PnlRow[] }>("/api/v1/portfolio/pnl?limit=50"),
   portfolioEquityCurve: () =>
     get<{ points: EquityPoint[] }>("/api/v1/portfolio/equity-curve?limit=200"),
   executionMetrics: () => get<ExecutionMetrics>("/api/v1/execution/metrics"),
+  executionWallet: () => get<WalletHealth>("/api/v1/execution/wallet"),
+
+  // --- Risk: read the defence layer, then operate it ---
+  riskStatus: () => get<RiskStatus>("/api/v1/risk/status"),
+  riskDrawdown: () => get<DrawdownState>("/api/v1/risk/drawdown"),
+  riskExposure: () => get<ExposureState>("/api/v1/risk/exposure"),
+  riskDecisions: (limit = 25) =>
+    get<{ decisions: RiskDecision[] }>(`/api/v1/risk/decisions?limit=${limit}`),
+  // These publish a command the Worker acts on; the response confirms the
+  // command was issued, not that it has taken effect yet. The screen re-reads
+  // status afterwards so the operator sees the real state rather than a promise.
+  resetKillSwitch: () => post<{ ok: boolean }>("/api/v1/risk/kill-switch/reset"),
+  resetCircuitBreaker: () => post<{ ok: boolean }>("/api/v1/risk/circuit-breaker/reset"),
+  tripCircuitBreaker: (reason: string) =>
+    post<{ ok: boolean }>(`/api/v1/risk/circuit-breaker/trip?reason=${encodeURIComponent(reason)}`),
+  enterEmergency: (reason: string) =>
+    post<{ ok: boolean }>(`/api/v1/risk/emergency/enter?reason=${encodeURIComponent(reason)}`),
+  exitEmergency: () => post<{ ok: boolean }>("/api/v1/risk/emergency/exit"),
   intelligenceStatus: () => get<IntelligenceStatus>("/api/v1/intelligence/status"),
   walletProfile: (address: string) =>
     get<WalletProfile>(`/api/v1/intelligence/wallet/${address}`),
@@ -452,5 +662,31 @@ export const api = {
   promoteModel: (modelId: string) =>
     post<{ promoted: boolean; model_id: string; name: string; version: string; status: string }>(
       `/api/v1/committee/models/${modelId}/promote`,
+    ),
+  // Research Lab — read-only except the human-gated promotion record.
+  researchStatus: () => get<ResearchStatus>("/api/v1/research/status"),
+  researchExperiments: (limit = 50) =>
+    get<{ experiments: ResearchExperiment[] }>(`/api/v1/research/experiments?limit=${limit}`),
+  researchBacktests: (limit = 50) =>
+    get<{ backtests: ResearchBacktest[] }>(`/api/v1/research/backtests?limit=${limit}`),
+  researchCandidates: () =>
+    get<{ candidates: ResearchCandidate[] }>("/api/v1/research/candidates"),
+  researchShadows: () =>
+    get<{ shadows: ShadowStrategy[]; source: string }>("/api/v1/research/shadows"),
+  researchRankings: () =>
+    get<{ ranking: string[]; entries: ShadowStrategy[] }>("/api/v1/research/rankings"),
+  researchPromotions: (limit = 50) =>
+    get<{ promotions: ResearchPromotion[] }>(`/api/v1/research/promotions?limit=${limit}`),
+  researchKnowledge: (limit = 100) =>
+    get<{ entries: ResearchKnowledgeEntry[] }>(`/api/v1/research/knowledge?limit=${limit}`),
+  researchHypotheses: (limit = 100) =>
+    get<{ hypotheses: ResearchHypothesis[] }>(`/api/v1/research/hypotheses?limit=${limit}`),
+  researchReports: (limit = 50) =>
+    get<{ reports: ResearchReport[] }>(`/api/v1/research/reports?limit=${limit}`),
+  // Fail-closed: the API rejects this without an explicit approve=true. It
+  // records a decision and returns a note saying nothing was activated.
+  promoteCandidate: (candidateId: string) =>
+    post<{ candidate_id: string; name: string; recorded: boolean; note: string }>(
+      `/api/v1/research/candidates/${candidateId}/promote?approve=true`,
     ),
 };

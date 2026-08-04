@@ -122,8 +122,9 @@ def _walk_diff(
 
 @runtime_checkable
 class ConfigSnapshotStore(Protocol):
-    async def add(self, version: int, payload: dict[str, Any], digest: str, created_by: str,
-                  note: str | None) -> None: ...
+    async def add(
+        self, version: int, payload: dict[str, Any], digest: str, created_by: str, note: str | None
+    ) -> None: ...
     async def next_version(self) -> int: ...
     async def list(self) -> list[dict[str, Any]]: ...
     async def get(self, version: int) -> dict[str, Any] | None: ...
@@ -241,9 +242,7 @@ class ConfigManager:
                     "diff": delta,
                 },
             )
-        _logger.warning(
-            "config_imported", version=version, applied=applied, refused=refused
-        )
+        _logger.warning("config_imported", version=version, applied=applied, refused=refused)
         return {"version": version, "applied": applied, "refused": refused, "diff": delta}
 
 
@@ -256,8 +255,9 @@ class PostgresConfigSnapshotStore:
     def __init__(self, database: Database) -> None:
         self._db = database
 
-    async def add(self, version: int, payload: dict[str, Any], digest: str, created_by: str,
-                  note: str | None) -> None:
+    async def add(
+        self, version: int, payload: dict[str, Any], digest: str, created_by: str, note: str | None
+    ) -> None:
         async with self._db.session() as session:
             session.add(
                 ConfigSnapshot(
@@ -352,8 +352,9 @@ class InMemoryConfigSnapshotStore:
     def __init__(self) -> None:
         self._rows: list[dict[str, Any]] = []
 
-    async def add(self, version: int, payload: dict[str, Any], digest: str, created_by: str,
-                  note: str | None) -> None:
+    async def add(
+        self, version: int, payload: dict[str, Any], digest: str, created_by: str, note: str | None
+    ) -> None:
         self._rows.append(
             {
                 "version": version,

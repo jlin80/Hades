@@ -28,6 +28,13 @@ class TradeApproved(DomainEvent):
     Carries the full sizing envelope and the human-readable rationale. The tags
     (``strategy``/``developer``/``cluster``/``narrative``/``regime``) travel with
     the approval so the opened position can be attributed for exposure tracking.
+
+    ``exploration`` marks a trade taken under the cold-start exploration
+    programme: a fixed, tiny size charged to an independent budget, bought to
+    generate evidence rather than for its expected return. It travels here so it
+    reaches the position, the fill and — the reason it exists — the settled
+    lesson, without which permanent memory would hold the trade but not the fact
+    that the platform paid for it in order to learn.
     """
 
     aggregate_type: str = "token"
@@ -41,6 +48,7 @@ class TradeApproved(DomainEvent):
     cluster: str | None = None
     narrative: str | None = None
     regime: str = "unknown"
+    exploration: bool = False
     correlation_id_ref: str | None = None
 
 

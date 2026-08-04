@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from collections import deque
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
 from hades.contexts.portfolio.domain.analytics import PortfolioMetrics, compute_metrics
 from hades.contexts.portfolio.domain.events import (
@@ -78,6 +79,10 @@ class PortfolioManager:
         self._slippage = 0.0
         self._peak = starting_balance_usd
         self._positions: dict[str, OpenPositionView] = {}
+        #: Entry facts the *monitor* needs to resume after a restart, kept beside
+        #: the risk view rather than inside it: ``OpenPositionView`` is the risk
+        #: context's shape and exposure analysis has no use for a fill price.
+        self._entries: dict[str, tuple[Decimal, Decimal, dict[str, str]]] = {}
         self._closed: list[ClosedTrade] = []
         self._opens: deque[tuple[datetime, str]] = deque(maxlen=1000)
         self._equity_curve: deque[float] = deque([starting_balance_usd], maxlen=_EQUITY_CURVE_MAX)
@@ -104,6 +109,11 @@ class PortfolioManager:
             regime=tags.get("regime", "unknown"),
             opened_at=event.occurred_at,
         )
+        self._entries[str(event.aggregate_id)] = (
+            Decimal(str(event.entry_price.amount)),
+            Decimal(str(event.quantity)),
+            dict(tags),
+        )
         self._cash -= notional
         self._opens.append((event.occurred_at, tags.get("strategy", "default")))
         await self._recompute()
@@ -125,6 +135,7 @@ class PortfolioManager:
             return
         key = str(event.aggregate_id)
         pos = self._positions.pop(key, None)
+        self._entries.pop(key, None)
         pnl = float(event.realized_pnl.amount)
         self._realized += pnl
         # Return the freed principal plus the realised PnL to cash.
@@ -265,6 +276,9 @@ class PortfolioManager:
                     narrative=p.narrative,
                     regime=p.regime,
                     opened_at=p.opened_at,
+                    entry_price=self._entries.get(key, (None, None, {}))[0],
+                    quantity=self._entries.get(key, (None, None, {}))[1],
+                    tags=self._entries.get(key, (None, None, {}))[2],
                 )
                 for key, p in self._positions.items()
             },
@@ -299,6 +313,11 @@ class PortfolioManager:
                 opened_at=p.opened_at,
             )
             for key, p in state.positions.items()
+        }
+        self._entries = {
+            key: (p.entry_price, p.quantity, dict(p.tags))
+            for key, p in state.positions.items()
+            if p.entry_price is not None and p.quantity is not None
         }
         self._closed = list(state.closed)
         self._opens = deque(state.opens, maxlen=1000)

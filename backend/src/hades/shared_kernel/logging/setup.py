@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import re
 import sys
 from collections.abc import Mapping
 from logging.handlers import RotatingFileHandler
@@ -88,12 +89,24 @@ def _ring_buffer_processor(
     Shipping failures are swallowed here as a last resort: a logging processor
     that raises would break the very call site it was only meant to observe.
     """
-    record = dict(event_dict)
+    # Scrub before the record leaves this process. The ring buffer is tailed by
+    # the dashboard terminal and the shipper republishes to Redis, so anything
+    # unredacted here is visible to every dashboard viewer — a wider audience
+    # than container logs, and the reason redaction cannot live only in a
+    # stdout handler.
+    record = _redact_record(dict(event_dict))
     get_log_buffer().append(record)
     if _shipper is not None:
         with contextlib.suppress(Exception):
             _shipper.submit(record)
     return event_dict
+
+
+def _redact_record(record: dict[str, Any]) -> dict[str, Any]:
+    for key, value in record.items():
+        if isinstance(value, str):
+            record[key] = redact_secrets(value)
+    return record
 
 
 def configure_logging(
@@ -153,12 +166,81 @@ def configure_logging(
 
     stdout_handler = logging.StreamHandler(sys.stdout)
     stdout_handler.setFormatter(formatter)
+    stdout_handler.addFilter(_SecretRedactingFilter())
     root.addHandler(stdout_handler)
+
+    _quiet_noisy_libraries()
 
     if to_file:
         _attach_file_handlers(root, formatter, directory, rotation_max_bytes, rotation_backups)
 
     _CONFIGURED = True
+
+
+# -- secret redaction ---------------------------------------------------------
+#
+# RPC providers put the credential in the query string, and `httpx` logs the full
+# request URL at INFO. That single line put a live Helius API key into container
+# logs, into the Redis log stream and — because the dashboard terminal tails that
+# stream — onto anyone's screen who opened the dashboard.
+#
+# Two defences, because either alone is brittle: the noisy client loggers are
+# raised to WARNING (they have no business narrating every request), and every
+# record that still reaches a handler is scrubbed. The scrub is last-resort and
+# deliberately pattern-based rather than key-name-based: a secret leaks through
+# whatever string happens to carry it, so matching the *shape* catches URLs we
+# never anticipated.
+
+_SECRET_PATTERNS = (
+    # `?api-key=…`, `&apikey=…`, `?token=…`, `&access_token=…` in any URL.
+    re.compile(
+        r"((?:api[-_]?key|access[-_]?token|token|secret|password|auth)=)[^&\s\"']+",
+        re.IGNORECASE,
+    ),
+    # Discord webhooks: the trailing segment is the credential.
+    re.compile(r"(discord(?:app)?\.com/api/webhooks/\d+/)[\w-]+", re.IGNORECASE),
+)
+
+_REDACTED = "***"
+
+
+def redact_secrets(text: str) -> str:
+    """Replace credential-shaped substrings with a placeholder."""
+    for pattern in _SECRET_PATTERNS:
+        text = pattern.sub(rf"\1{_REDACTED}", text)
+    return text
+
+
+class _SecretRedactingFilter(logging.Filter):
+    """Scrubs credentials out of every record before it is emitted."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            if isinstance(record.msg, str):
+                record.msg = redact_secrets(record.msg)
+            if record.args:
+                if isinstance(record.args, dict):
+                    record.args = {
+                        k: redact_secrets(v) if isinstance(v, str) else v
+                        for k, v in record.args.items()
+                    }
+                elif isinstance(record.args, tuple):
+                    record.args = tuple(
+                        redact_secrets(a) if isinstance(a, str) else a for a in record.args
+                    )
+        except Exception:  # logging must never raise into the caller
+            return True
+        return True
+
+
+#: Clients that narrate every request at INFO. The request URL is exactly where
+#: credentials live, so these are raised to WARNING rather than merely scrubbed.
+_NOISY_LOGGERS = ("httpx", "httpcore", "urllib3", "websockets.client")
+
+
+def _quiet_noisy_libraries() -> None:
+    for name in _NOISY_LOGGERS:
+        logging.getLogger(name).setLevel(logging.WARNING)
 
 
 def _attach_file_handlers(
