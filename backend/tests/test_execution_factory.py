@@ -89,3 +89,45 @@ def test_live_built_only_with_gate_and_all_adapters() -> None:
     )
     assert bundle.live_enabled is True
     assert ExecutionMode.LIVE.value in bundle.engine._executors
+    # The original live adapter remains the default — the fast path is opt-in.
+    assert bundle.live_adapter == "live"
+
+
+def test_fast_path_flag_alone_never_opens_the_live_gate() -> None:
+    """The flag chooses *between* live adapters; it can never enable live."""
+    bus, notifier = _deps()
+    settings = Settings()
+    settings.execution.fast_path_enabled = True
+    bundle = build_execution_engine(
+        settings,
+        event_bus=bus,
+        notifier=notifier,
+        mode_provider=_mode,
+        signer=_Signer(),
+        quote_provider=_Quotes(),
+        rpc=_Rpc(),
+    )
+    assert bundle.live_enabled is False
+    assert bundle.live_adapter is None
+    assert ExecutionMode.LIVE.value not in bundle.engine._executors
+
+
+def test_fast_path_adapter_is_selected_only_when_the_flag_is_on() -> None:
+    bus, notifier = _deps()
+    settings = Settings().model_copy(update={"live_trading_enabled": True})
+    settings.execution.fast_path_enabled = True
+    bundle = build_execution_engine(
+        settings,
+        event_bus=bus,
+        notifier=notifier,
+        mode_provider=_mode,
+        signer=_Signer(),
+        quote_provider=_Quotes(),
+        rpc=_Rpc(),
+    )
+    assert bundle.live_enabled is True
+    assert bundle.live_adapter == "fast_path"
+
+
+def test_fast_path_is_off_by_default_in_settings() -> None:
+    assert Settings().execution.fast_path_enabled is False

@@ -17,6 +17,7 @@ from hades.contexts.execution.domain.models import (
     FillReport,
     OrderRequest,
     Quote,
+    SendReceipt,
 )
 
 
@@ -49,6 +50,30 @@ class TransactionSigner(Protocol):
     def public_key(self) -> str: ...
 
     async def sign_and_send(self, serialized_tx: bytes) -> str: ...
+
+
+@runtime_checkable
+class TransactionSubmitter(Protocol):
+    """Carries an already-built transaction to the network — the *transport* seam.
+
+    :class:`TransactionSigner` conflates signing and sending in one call, which is
+    correct for the plain RPC path but leaves no place to plug a different
+    transport. This port isolates the part that actually differs between a plain
+    RPC send, a staked/dual-routed sender and a Jito bundle: where the bytes go,
+    what it costs in tip, and how long it takes.
+
+    Implementations must be **fail-closed**: a submission that could not be
+    handed to the network returns ``accepted=False`` with a reason, never an
+    optimistic signature. See ``docs/EXECUTION_FAST_PATH_2026-08-04.md`` for the
+    routes this is meant to accommodate.
+    """
+
+    @property
+    def route(self) -> str:
+        """Stable label for the transport ("signer", "sender", "jito"…)."""
+        ...
+
+    async def submit(self, serialized_tx: bytes) -> SendReceipt: ...
 
 
 @runtime_checkable

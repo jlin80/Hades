@@ -478,6 +478,11 @@ class ExecutionSettings(_Section):
     # positions are opened and never closed — leave it on.
     position_monitor_enabled: bool = True
     position_monitor_interval_seconds: float = 5.0
+    # The instrumented fast-path adapter (docs/EXECUTION_FAST_PATH_2026-08-04.md).
+    # OFF by default and, even when on, only built if the hard live gate is
+    # already open — it is a live adapter, not a second paper mode. Turning this
+    # on swaps which live adapter the engine routes to; it never enables live.
+    fast_path_enabled: bool = False
 
 
 class PaperSettings(_Section):
