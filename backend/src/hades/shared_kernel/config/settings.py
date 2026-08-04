@@ -483,6 +483,12 @@ class ExecutionSettings(_Section):
     # already open — it is a live adapter, not a second paper mode. Turning this
     # on swaps which live adapter the engine routes to; it never enables live.
     fast_path_enabled: bool = False
+    # Shadow mode: run a candidate adapter alongside the real one and record the
+    # comparison. OFF by default, and inert without a candidate adapter to
+    # compare against. A live adapter can never be the candidate — see
+    # ShadowExecutor, which refuses it outright rather than behind a flag.
+    shadow_enabled: bool = False
+    shadow_timeout_seconds: float = 30.0
 
 
 class PaperSettings(_Section):

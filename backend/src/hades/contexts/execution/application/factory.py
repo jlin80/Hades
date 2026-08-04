@@ -21,6 +21,7 @@ from hades.contexts.execution.application.metrics import ExecutionMetrics
 from hades.contexts.execution.application.order_manager import OrderManager
 from hades.contexts.execution.application.paper_executor import PaperExecutor
 from hades.contexts.execution.application.retry import RetryEngine, RetryPolicy
+from hades.contexts.execution.application.shadow import ShadowExecutor
 from hades.contexts.execution.application.slippage import SlippageEngine
 from hades.contexts.execution.application.submitters import SignerSubmitter
 from hades.contexts.execution.application.swap_manager import SwapManager
@@ -93,6 +94,7 @@ def build_execution_engine(
     quote_provider: QuoteProvider | None = None,
     rpc: RpcGateway | None = None,
     submitter: TransactionSubmitter | None = None,
+    shadow_candidate: Executor | None = None,
     order_store: OrderStore | None = None,
     transaction_store: TransactionStore | None = None,
 ) -> ExecutionEngineBundle:
@@ -111,7 +113,8 @@ def build_execution_engine(
         latency_ms=settings.paper.simulated_latency_ms,
         base_slippage_bps=settings.paper.simulated_slippage_bps,
     )
-    executors: dict[str, Executor] = {ExecutionMode.PAPER.value: paper}
+    paper_seam = _maybe_shadow(settings, primary=paper, candidate=shadow_candidate)
+    executors: dict[str, Executor] = {ExecutionMode.PAPER.value: paper_seam}
 
     live = _maybe_build_live(
         settings,
@@ -147,6 +150,32 @@ def _adapter_label(live: LiveExecutor | FastPathExecutor | None) -> str | None:
     if live is None:
         return None
     return "fast_path" if isinstance(live, FastPathExecutor) else "live"
+
+
+def _maybe_shadow(
+    settings: Settings, *, primary: Executor, candidate: Executor | None
+) -> Executor:
+    """Wrap ``primary`` in a shadow comparison, or return it untouched.
+
+    Fail-safe in both directions: no flag means no wrapping, and a flag with no
+    candidate means no wrapping either (loudly — an operator who turned shadow on
+    and got silence would reasonably assume it was measuring something).
+    """
+    if not settings.execution.shadow_enabled:
+        return primary
+    if candidate is None:
+        _logger.warning(
+            "shadow_not_built",
+            reason="no candidate adapter supplied",
+            note="shadow mode is enabled but has nothing to compare against",
+        )
+        return primary
+    _logger.info("shadow_built", primary_mode=primary.mode, candidate_mode=candidate.mode)
+    return ShadowExecutor(
+        primary=primary,
+        candidate=candidate,
+        timeout_seconds=settings.execution.shadow_timeout_seconds,
+    )
 
 
 def _maybe_build_live(

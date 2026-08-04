@@ -6,6 +6,7 @@ from decimal import Decimal
 from typing import Any
 
 from hades.contexts.execution.application.factory import build_execution_engine
+from hades.contexts.execution.application.shadow import ShadowExecutor
 from hades.contexts.execution.domain.models import ExecutionMode, Quote
 from hades.contexts.notification.application.publisher import NotificationPublisher
 from hades.shared_kernel.config.settings import Settings
@@ -44,6 +45,17 @@ class _Quotes:
 
     async def build_swap_tx(self, quote: Quote, *, owner: str) -> bytes:
         return b"tx"
+
+
+class _PaperLike:
+    """A non-fund-moving candidate — the only kind a shadow may ever run."""
+
+    @property
+    def mode(self) -> str:
+        return ExecutionMode.PAPER.value
+
+    async def execute(self, request: Any) -> Any:  # pragma: no cover — never called here
+        raise NotImplementedError
 
 
 class _Rpc:
@@ -131,3 +143,40 @@ def test_fast_path_adapter_is_selected_only_when_the_flag_is_on() -> None:
 
 def test_fast_path_is_off_by_default_in_settings() -> None:
     assert Settings().execution.fast_path_enabled is False
+
+
+def test_shadow_is_off_by_default_and_leaves_the_paper_executor_alone() -> None:
+    bus, notifier = _deps()
+    bundle = build_execution_engine(
+        Settings(), event_bus=bus, notifier=notifier, mode_provider=_mode
+    )
+    assert Settings().execution.shadow_enabled is False
+    assert not isinstance(bundle.engine._executors[ExecutionMode.PAPER.value], ShadowExecutor)
+
+
+def test_shadow_enabled_without_a_candidate_is_inert_not_broken() -> None:
+    """An operator turning shadow on with nothing to compare gets paper, not a crash."""
+    bus, notifier = _deps()
+    settings = Settings()
+    settings.execution.shadow_enabled = True
+    bundle = build_execution_engine(
+        settings, event_bus=bus, notifier=notifier, mode_provider=_mode
+    )
+    assert not isinstance(bundle.engine._executors[ExecutionMode.PAPER.value], ShadowExecutor)
+
+
+def test_shadow_wraps_the_paper_executor_when_a_candidate_is_supplied() -> None:
+    bus, notifier = _deps()
+    settings = Settings()
+    settings.execution.shadow_enabled = True
+    bundle = build_execution_engine(
+        settings,
+        event_bus=bus,
+        notifier=notifier,
+        mode_provider=_mode,
+        shadow_candidate=_PaperLike(),
+    )
+    wrapped = bundle.engine._executors[ExecutionMode.PAPER.value]
+    assert isinstance(wrapped, ShadowExecutor)
+    # The engine still routes and labels it as paper — the shadow is invisible.
+    assert wrapped.mode == ExecutionMode.PAPER.value
