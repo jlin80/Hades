@@ -175,6 +175,10 @@ class ExplorationRuntime:
             "granted_total": status.granted_total,
             "declined_total": status.declined_total,
             "declines_by_reason": status.declines_by_reason,
+            # Progress and its two alarms. `budget_exhausts_first` is the one to
+            # read first: it says the programme cannot finish on the runway it
+            # has left, which is knowable long before the last dollar goes.
+            "progress": status.progress.model_dump(mode="json"),
             "updated_at": time.time(),
         }
 

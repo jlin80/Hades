@@ -65,6 +65,18 @@ class ExplorationMetrics:
             "hades_exploration_budget_total_remaining_usd",
             "Unspent portion of the programme's lifetime exploration budget",
         )
+        self.progress_pct = metrics.gauge(
+            "hades_exploration_progress_pct",
+            "Progress to sufficiency against the binding condition (0-100)",
+        )
+        self.trades_remaining = metrics.gauge(
+            "hades_exploration_trades_remaining",
+            "Exploration trades the lifetime budget can still fund",
+        )
+        self.eta_days = metrics.gauge(
+            "hades_exploration_eta_days",
+            "Estimated days to a trainable model at the observed rate; -1 when unknown",
+        )
 
 
 __all__ = ["ExplorationMetrics"]

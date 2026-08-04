@@ -298,6 +298,57 @@ class ExplorationRecord(ValueObject):
     correlation_id: str | None = None
 
 
+class ExplorationProgress(ValueObject):
+    """How far along the programme is, and whether it can finish at all.
+
+    The three sufficiency conditions are a conjunction, so progress is the
+    **binding** one — the minimum — never the average. Averaging would report a
+    programme at 70% when it holds 60 lessons that are all losses, which is the
+    single state the whole evidence design exists to prevent: it satisfies the
+    count, cannot validate a model, and would look nearly finished.
+
+    :attr:`budget_exhausts_first` is the question nobody was asking. Exploration
+    buys lessons with a fixed-size budget, so there is a knowable answer to "can
+    the remaining runway still buy the evidence we lack?" — and if it cannot, the
+    programme is already doomed and the operator should learn that now rather
+    than when the last dollar goes. It is deliberately conservative: unknown
+    conversion means no alarm, because crying wolf on a young programme with two
+    trades of history would train the operator to ignore it.
+    """
+
+    lessons_needed: int = 0
+    positive_needed: int = 0
+    negative_needed: int = 0
+    #: 0.0 to 1.0 against the binding condition. 1.0 means sufficiency is reached.
+    pct_complete: float = 0.0
+    #: Exploration trades the lifetime budget can still fund.
+    trades_remaining: int = 0
+    #: Observed settled lessons per exploration trade. ``None`` until there is
+    #: enough history to divide by — never defaulted to 1.0, which would assume
+    #: the conversion this figure exists to measure.
+    lessons_per_trade: float | None = None
+    #: Observed accumulation rate and the resulting estimate. Both ``None`` when
+    #: the history is too short to say anything honest.
+    lessons_per_day: float | None = None
+    eta_days: float | None = None
+    #: True only when the arithmetic is known *and* says the runway is short.
+    budget_exhausts_first: bool = False
+    note: str = ""
+
+    @property
+    def complete(self) -> bool:
+        return self.pct_complete >= 1.0
+
+    @property
+    def stalled(self) -> bool:
+        """Spending with a measured rate of zero — the failure mode that matters.
+
+        A programme burning budget while the lesson count stays flat is the state
+        the metrics docstring calls out as the one worth catching within an hour.
+        """
+        return self.lessons_per_day is not None and self.lessons_per_day <= 0.0
+
+
 class ExplorationStatus(ValueObject):
     """The whole programme in one object, for the API and the dashboard."""
 
@@ -311,6 +362,7 @@ class ExplorationStatus(ValueObject):
     granted_total: int = 0
     declined_total: int = 0
     declines_by_reason: dict[str, int] = Field(default_factory=dict)
+    progress: ExplorationProgress = Field(default_factory=ExplorationProgress)
 
 
 __all__ = [

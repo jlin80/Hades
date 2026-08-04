@@ -54,12 +54,14 @@ from hades.contexts.exploration.domain.models import (
     ExplorationCandidate,
     ExplorationConfig,
     ExplorationDecline,
+    ExplorationProgress,
     ExplorationRecord,
     ExplorationSpend,
     ExplorationStatus,
     ExplorationVerdict,
 )
 from hades.contexts.exploration.domain.ports import EvidencePort, ExplorationLedgerStore
+from hades.contexts.exploration.domain.progress import compute_progress
 from hades.shared_kernel.domain.identifiers import new_id
 from hades.shared_kernel.events import EventBus
 from hades.shared_kernel.logging import get_logger
@@ -216,15 +218,25 @@ class ExplorationService:
     async def status(self) -> ExplorationStatus:
         """The whole programme, for the API and the dashboard."""
         now = datetime.now(UTC)
+        records: list[ExplorationRecord] = []
         try:
             evidence = await self._evidence_status()
             spend = await self._spend(now)
+            records = await self._ledger.recent(limit=200)
         except Exception as exc:
             if self._metrics is not None:
                 self._metrics.errors.inc()
             _logger.warning("exploration_status_failed", error=str(exc))
             evidence, spend = EvidenceStatus(available=False), ExplorationSpend()
         active = self._cfg.enabled and not self._completed and not evidence.sufficient
+        progress = compute_progress(
+            evidence=evidence,
+            budget=self._cfg.budget,
+            spend=spend,
+            records=records,
+            now=now,
+        )
+        self._report_progress(progress, active=active)
         return ExplorationStatus(
             enabled=self._cfg.enabled,
             active=active,
@@ -235,7 +247,39 @@ class ExplorationService:
             granted_total=self._granted,
             declined_total=self._declined,
             declines_by_reason=dict(self._declines),
+            progress=progress,
         )
+
+    def _report_progress(self, progress: ExplorationProgress, *, active: bool) -> None:
+        """Publish progress to metrics, and say the two things worth waking up for.
+
+        Both warnings are gated on the programme being *active*: a finished or
+        switched-off programme with a short runway is not a problem, and an alert
+        that fires in the ordinary end state is an alert the operator learns to
+        ignore.
+        """
+        if self._metrics is not None:
+            self._metrics.progress_pct.set(progress.pct_complete * 100.0)
+            self._metrics.trades_remaining.set(progress.trades_remaining)
+            self._metrics.eta_days.set(progress.eta_days if progress.eta_days is not None else -1.0)
+        if not active:
+            return
+        if progress.budget_exhausts_first:
+            _logger.warning(
+                "exploration_budget_exhausts_before_evidence",
+                pct_complete=round(progress.pct_complete * 100, 2),
+                lessons_needed=progress.lessons_needed,
+                trades_remaining=progress.trades_remaining,
+                lessons_per_trade=progress.lessons_per_trade,
+                note=progress.note,
+            )
+        elif progress.stalled:
+            _logger.warning(
+                "exploration_stalled",
+                lessons_per_day=progress.lessons_per_day,
+                trades_remaining=progress.trades_remaining,
+                note="spending exploration budget without accumulating lessons",
+            )
 
     @property
     def completed(self) -> bool:
