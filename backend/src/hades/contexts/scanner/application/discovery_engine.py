@@ -9,6 +9,15 @@ Resilience is first-class: each source runs in its own supervised task; if a
 source errors or its stream ends, the engine emits a ``SourceHealthChanged``
 event, backs off, and reconnects — one bad DEX never stops the others, and the
 engine is designed to run for months without intervention.
+
+"Supervised" is load-bearing and was once only aspirational. Reporting a source
+as down published an event on the way, so when the broker was the thing failing,
+the report killed the reporter: the loop ended from inside its own exception
+handler, before the line that would have named the source. Three of four sources
+went dark that way and only one left any trace. So: health is recorded locally
+before it is announced, announcing can fail without consequence, and every source
+task carries a completion callback — because a loop that stops must be visible
+even when the reason it stopped is the thing we would have used to say so.
 """
 
 from __future__ import annotations
@@ -70,14 +79,52 @@ class DiscoveryEngine:
         for source in self._sources:
             self._metrics.sources_available.labels(source=source.name).set(1)
             self._source_up[source.name] = True
-        tasks = [
-            asyncio.create_task(self._run_source(source, stop), name=f"discovery:{source.name}")
-            for source in self._sources
-        ]
+        tasks = [self._spawn_source(source, stop) for source in self._sources]
         await stop.wait()
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+
+    def _spawn_source(self, source: TokenSource, stop: asyncio.Event) -> asyncio.Task[None]:
+        """Start a source's supervised loop under a callback that cannot stay quiet.
+
+        A bare ``create_task`` here is how three of four sources went dark and only
+        one of them left a log line. asyncio reports an unretrieved task exception
+        from the task's ``__del__``, and these tasks are held in a local list until
+        shutdown, so a crashed source loop was collected by nobody and announced by
+        nothing — the source simply stopped polling and its health flag stayed
+        wherever it happened to land.
+        """
+        task = asyncio.create_task(self._run_source(source, stop), name=f"discovery:{source.name}")
+        task.add_done_callback(lambda t: self._on_source_task_done(source.name, t, stop))
+        return task
+
+    def _on_source_task_done(
+        self, name: str, task: asyncio.Task[None], stop: asyncio.Event
+    ) -> None:
+        """Report a source loop that ended, and stop claiming the source is up."""
+        if task.cancelled() or stop.is_set():
+            return  # ordinary shutdown
+        # Whatever ended this loop, the source is not being polled any more. Say so
+        # in the health map too, so `/api/v1/scanner/status` cannot keep reporting a
+        # source as available when nothing is reading it.
+        self._source_up[name] = False
+        self._metrics.sources_available.labels(source=name).set(0)
+        exc = task.exception()
+        if exc is None:
+            _logger.error(
+                "discovery_source_task_exited",
+                source=name,
+                note="a source loop that should run until shutdown returned on its own",
+            )
+            return
+        _logger.error(
+            "discovery_source_task_crashed",
+            source=name,
+            error=str(exc),
+            error_type=type(exc).__name__,
+            exc_info=exc,
+        )
 
     async def _run_source(self, source: TokenSource, stop: asyncio.Event) -> None:
         backoff = _BACKOFF_MIN
@@ -93,8 +140,14 @@ class DiscoveryEngine:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                await self._mark_source(source.name, up=False, detail=str(exc))
+                # Log *before* marking. The order is the whole lesson: this used to
+                # call `_mark_source` first, and `_mark_source` published to the same
+                # Redis that was timing out. When that publish raised, the exception
+                # escaped from inside this `except` block, ended the loop, and killed
+                # the source — and the log line below, which would have named it, was
+                # never reached. A source died with no trace at all.
                 _logger.warning("discovery_source_error", source=source.name, error=describe(exc))
+                await self._mark_source(source.name, up=False, detail=str(exc))
                 await self._sleep_or_stop(stop, backoff)
                 backoff = min(_BACKOFF_MAX, backoff * 2)
             else:
@@ -128,13 +181,34 @@ class DiscoveryEngine:
         return None
 
     async def _mark_source(self, name: str, *, up: bool, detail: str) -> None:
+        """Record a source's health locally, then announce it. **Never raises.**
+
+        The local state is updated first and unconditionally; the publish is a
+        notification and is treated as one. That split is deliberate: this method is
+        called from inside the exception handler that keeps a source alive, so an
+        exception escaping here does not merely lose an event — it ends the source's
+        loop entirely. It did, to three of four sources, on a day when Redis was
+        timing out under host contention. A broker that cannot take the news must
+        not be able to make the news worse.
+        """
         if self._source_up.get(name) == up:
             return
         self._source_up[name] = up
         self._metrics.sources_available.labels(source=name).set(1 if up else 0)
-        await self._bus.publish(
-            SourceHealthChanged(aggregate_id=new_id(), source=name, available=up, detail=detail)
-        )
+        try:
+            await self._bus.publish(
+                SourceHealthChanged(aggregate_id=new_id(), source=name, available=up, detail=detail)
+            )
+        except asyncio.CancelledError:  # shutdown must still propagate
+            raise
+        except Exception as exc:
+            _logger.warning(
+                "source_health_publish_failed",
+                source=name,
+                available=up,
+                error=describe(exc),
+                note="health recorded locally; only the announcement was lost",
+            )
 
     async def _sleep_or_stop(self, stop: asyncio.Event, seconds: float) -> None:
         try:

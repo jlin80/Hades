@@ -2398,6 +2398,61 @@ title would otherwise grow it forever.
 
 ---
 
+## 6t. The report that killed the reporter — three discovery sources (2026-08-04)
+
+Found hours after deploying §6r, on a Scanner that looked healthy: `/api/v1/scanner/status`
+showed `sources_available: 1` of 4. `raydium`, `dexscreener` and `orca` were all `down` while
+`pumpfun` alone fed the funnel.
+
+**It was not the sources.** All four endpoints answered `HTTP 200` from inside the container
+(`pumpfun` 10.3 s / 88 KB, `raydium` 2.4 s / 210 KB, `dexscreener` 1.9 s / 27 KB, `orca` 4.9 s /
+17.9 MB). Not network, not config, and not a stale snapshot — the published status was four
+seconds old.
+
+**The evidence that named it.** `raydium` and `dexscreener` last logged
+`discovery_source_error` at 04:22:35, both `TimeoutError: Timeout reading from redis:6379` — a
+timeout in the *dedup registry*, not in the source. Then thirty-three minutes of silence with
+both still `down`. With `_BACKOFF_MAX = 60.0`, a live-but-failing source logs at least once a
+minute; silence meant the loops were gone. And `orca` was `down` having logged **nothing at
+all**, which no code path allowed: `_mark_source(up=False)` was reachable only from the `except`
+block, and that block always logged.
+
+**The mechanism.** The order of two lines:
+
+```python
+except Exception as exc:
+    await self._mark_source(source.name, up=False, detail=str(exc))  # publishes to the bus
+    _logger.warning("discovery_source_error", ...)                    # never reached if it raises
+```
+
+`_mark_source` announced the health change on the same Redis that was timing out. When that
+publish raised, the exception left from *inside* the exception handler, escaped the `while`, and
+ended the source loop — before the line that would have named it. The tasks were started with a
+bare `asyncio.create_task` and held in a local list until shutdown, so asyncio's "Task exception
+was never retrieved" never fired either (§6r, same cause: a referenced task is never collected).
+A source stopped polling, said nothing, and its health flag stayed wherever it landed.
+
+### The fix
+- **`_mark_source` never raises.** Local state and the metric are updated first and
+  unconditionally; the publish is wrapped and downgraded to `source_health_publish_failed`.
+  `CancelledError` still propagates so shutdown works.
+- **Log before marking.** The error is on record before anything that could fail is attempted.
+- **Every source task is supervised.** `_spawn_source` adds a done-callback:
+  `discovery_source_task_crashed` with traceback, or `discovery_source_task_exited` if it merely
+  returned — and either way the source is flipped to `down`, so `/api/v1/scanner/status` cannot
+  advertise a source nothing is polling.
+
+Tests in `test_scanner_discovery.py` (+3): a bus that always fails must not kill the source loop;
+a dead source task must not read as up; a source recovers to up after a transient failure.
+
+> This is §6r one layer down, and it survived §6r's fix because that fix supervised
+> `ServiceProcess`'s tasks — the event-bus consumer and liveness — and these tasks belong to the
+> Discovery Engine. The lesson generalises past the patch: **the path that reports a failure must
+> not depend on the subsystem that is failing.** Redis was both the thing timing out and the wire
+> the bad news travelled on, so the news died with the messenger.
+
+---
+
 ## 7. Testing
 
 `backend/tests` (379 tests, all green; `mypy --strict` clean; `ruff` clean; suite runs
