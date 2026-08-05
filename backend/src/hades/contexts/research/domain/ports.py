@@ -50,6 +50,30 @@ class HistoricalDataReader(Protocol):
     async def count(self) -> int: ...
 
 
+class HistoricalDecisionRow(dict[str, Any]):
+    """One stored decision, as the *production* decision path would see it.
+
+    Deliberately not a :class:`HistoricalSample`: that type is projected onto the
+    lab's own normalised channels, which discards the production feature names the
+    Committee actually reads. Replaying the real committee needs the raw vector,
+    the timestamp the decision was made at, and a label that is ``None`` unless it
+    was genuinely realised.
+    """
+
+
+@runtime_checkable
+class DecisionHistoryReader(Protocol):
+    """Read-only access to stored decisions for :mod:`decision_backtest`.
+
+    Read-only for the same reason as :class:`HistoricalDataReader`, and separate
+    from it because the shapes differ, not because the source does.
+    """
+
+    async def load_decisions(
+        self, *, from_iso: str | None = None, to_iso: str | None = None, limit: int = 100_000
+    ) -> Sequence[HistoricalDecisionRow]: ...
+
+
 @runtime_checkable
 class ExperimentRunner(Protocol):
     """Executes a defined experiment against historical (copied) data."""
