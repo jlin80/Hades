@@ -365,6 +365,14 @@ class RiskSettings(_Section):
     max_exposure_per_narrative_pct: float = 35.0
     max_exposure_per_regime_pct: float = 60.0
     max_correlated_positions: int = 3
+    # Volatility targeting - an OPTIONAL extra layer over conviction sizing, OFF
+    # by default. Reduce-only unless max_scale is raised above 1.0, and inert on
+    # a token whose volatility is unmeasured. See VolatilitySizingConfig.
+    volatility_sizing_enabled: bool = False
+    volatility_target_pct: float = 15.0
+    volatility_min_scale: float = 0.25
+    volatility_max_scale: float = 1.0
+    volatility_min_measurable_pct: float = 1.0
     # Trade-rate caps.
     max_trades_per_hour: int = 20
     max_trades_per_hour_per_strategy: int = 8

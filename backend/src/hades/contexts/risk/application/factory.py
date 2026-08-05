@@ -39,6 +39,7 @@ from hades.contexts.risk.domain.models import (
     RiskBudget,
     RiskConfig,
     SizingConfig,
+    VolatilitySizingConfig,
 )
 from hades.contexts.risk.domain.ports import (
     ExplorationPort,
@@ -67,6 +68,13 @@ def risk_config_from_settings(settings: Settings) -> RiskConfig:
             min_prob_roi_positive=r.min_prob_roi_positive,
             min_confidence=r.min_confidence,
             min_security_score=settings.security.min_security_score,
+            volatility=VolatilitySizingConfig(
+                enabled=r.volatility_sizing_enabled,
+                target_volatility_pct=r.volatility_target_pct,
+                min_scale=r.volatility_min_scale,
+                max_scale=r.volatility_max_scale,
+                min_measurable_volatility_pct=r.volatility_min_measurable_pct,
+            ),
         ),
         exposure=ExposureLimits(
             max_portfolio_pct=r.max_portfolio_exposure_pct,

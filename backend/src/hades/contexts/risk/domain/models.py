@@ -175,6 +175,61 @@ class PositionSizing(ValueObject):
 # =============================================================================
 
 
+class VolatilitySizingConfig(ValueObject):
+    """Volatility targeting — an extra *reducing* layer over conviction sizing.
+
+    The idea is standard: hold risk roughly constant across instruments by
+    scaling size inversely with realised volatility, so a token moving 40% a day
+    is not given the same notional as one moving 10%. Here it is deliberately
+    constrained in three ways.
+
+    **It is off by default.** Enabling it changes every size the platform
+    computes, and that is a decision with money attached.
+
+    **It cannot scale up past the base by default** (``max_scale = 1.0``). The
+    sizing engine's existing rule is that doubt reduces size and never amplifies
+    it beyond the base; a volatility layer that could multiply a position because
+    a token looks calm would quietly invert that rule — and "calm" in a
+    freshly-launched memecoin usually means "not trading yet", which is the worst
+    possible reason to size up.
+
+    **Unknown volatility means no adjustment**, never an optimistic one. A token
+    with no price history yields ``0.0``, and a naive formula would read that as
+    zero risk and scale to the ceiling. The one case where this layer could do
+    real damage is the one where it has no data, so that case is inert.
+
+    Why not fractional Kelly: Kelly sizes from an *edge estimate*, and it is only
+    as sane as the probabilities feeding it. This platform's committee currently
+    runs on default priors with no trained models, so a Kelly fraction here would
+    be arithmetic performed on a guess and would size most aggressively exactly
+    where the model is least informed. Volatility is measured rather than
+    predicted, which is why it is the layer that can be added now.
+    """
+
+    enabled: bool = False
+    #: The volatility level the base size is calibrated for, in percent.
+    target_volatility_pct: float = Field(default=15.0, gt=0.0)
+    #: Bounds on the scale factor. ``max_scale`` at 1.0 means reduce-only.
+    min_scale: float = Field(default=0.25, gt=0.0, le=1.0)
+    max_scale: float = Field(default=1.0, ge=1.0)
+    #: Volatility below this is treated as unmeasured rather than as calm.
+    min_measurable_volatility_pct: float = Field(default=1.0, gt=0.0)
+
+    def scale_for(self, volatility_pct: float) -> float:
+        """Scale factor for a measured volatility, clamped into the band.
+
+        Returns exactly ``1.0`` — no adjustment — whenever the input is not a
+        usable measurement, which includes zero, negatives and anything under
+        the measurability floor.
+        """
+        if not self.enabled:
+            return 1.0
+        if volatility_pct < self.min_measurable_volatility_pct:
+            return 1.0
+        raw = self.target_volatility_pct / volatility_pct
+        return round(max(self.min_scale, min(self.max_scale, raw)), 6)
+
+
 class SizingConfig(ValueObject):
     """Everything the Position Sizing Engine needs, as an immutable snapshot."""
 
@@ -189,6 +244,7 @@ class SizingConfig(ValueObject):
     min_prob_roi_positive: float = 0.55
     min_confidence: float = 0.40
     min_security_score: float = 60.0
+    volatility: VolatilitySizingConfig = Field(default_factory=lambda: VolatilitySizingConfig())
 
 
 class ExposureLimits(ValueObject):
@@ -395,6 +451,10 @@ class RiskCandidate(ValueObject):
     wallet_risk_score: float = 50.0
     liquidity_score: float = 50.0
     liquidity_usd: float = 0.0
+    #: Realised volatility in percent, from the feature store's regime block.
+    #: ``0.0`` means *unmeasured*, not calm — the volatility sizing layer treats
+    #: it as "no adjustment" rather than as an invitation to size up.
+    volatility_pct: float = 0.0
     # Strategy Engine consensus, when the roster has actually spoken for this
     # token. ``ensemble_participating == 0`` means "no opinion recorded", which
     # is different from "the strategies dislike it" and must never be read as a

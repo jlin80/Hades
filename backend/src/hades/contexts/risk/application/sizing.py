@@ -8,12 +8,19 @@ into an amount of capital to *risk* (a fraction of equity), and converts the
 risk into a notional via the stop distance:
 
     risk_usd  = equity x risk_per_trade% x conviction x kill_switch_factor
-    notional  = risk_usd / stop_loss_fraction        (bounded by caps + cash)
+    notional  = risk_usd / stop_loss_fraction
+    notional *= volatility_scale                     (optional, off by default)
+    notional  = min(notional, max_position_size_usd, available_usd)
 
 The result reproduces the intent in the spec - a stellar setup gets a large
 size, a marginal one a small size, and anything below the minimum is not traded
 at all. It is pure: no I/O, fully deterministic, unit-testable. It only *sizes*;
 it never decides to trade (the policy chain does) and never executes.
+
+The volatility layer is additional, not a replacement: conviction still decides
+the base size, and the caps are applied *after* the scaling so they always bind.
+See :class:`VolatilitySizingConfig` for why it is reduce-only by default and why
+unmeasured volatility produces no adjustment at all.
 """
 
 from __future__ import annotations
@@ -77,6 +84,16 @@ class PositionSizingEngine:
         stop_fraction = max(0.01, self._cfg.stop_loss_pct / 100.0)
         risk_usd = equity_usd * (self._cfg.risk_per_trade_pct / 100.0) * conviction
         raw_notional = risk_usd / stop_fraction
+
+        # Volatility targeting, applied *before* the caps so the caps still bind.
+        # Ordering is the safety property here: a layer applied after the caps
+        # could lift a size above max_position_size_usd, and that ceiling is not
+        # a suggestion. Everything this layer can do is re-clamped below.
+        vol_scale = self._cfg.volatility.scale_for(candidate.volatility_pct)
+        if vol_scale != 1.0:
+            raw_notional *= vol_scale
+        factors["volatility_pct"] = round(candidate.volatility_pct, 4)
+        factors["volatility_scale"] = round(vol_scale, 4)
 
         # Bound by the hard per-trade cap and the deployable cash.
         notional = min(raw_notional, self._cfg.max_position_size_usd, max(0.0, available_usd))

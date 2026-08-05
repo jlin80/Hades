@@ -60,6 +60,9 @@ class RiskContextBuilder:
             wallet_risk_score=_as_float(facts.get("wallet_risk"), 100.0 - wallet_health),
             liquidity_score=member_score("liquidity", 50.0),
             liquidity_usd=_as_float(facts.get("liquidity_usd"), 0.0),
+            # 0.0 means unmeasured, which the sizing layer reads as "no
+            # adjustment" rather than as calm. See VolatilitySizingConfig.
+            volatility_pct=_as_float(facts.get("volatility_pct"), 0.0),
             ensemble_decision=_as_str(facts.get("ensemble_decision"), "unknown"),
             ensemble_score=_as_float(facts.get("ensemble_score"), 0.0),
             ensemble_confidence=_as_float(facts.get("ensemble_confidence"), 0.0),
