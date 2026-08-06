@@ -138,11 +138,71 @@ async def test_a_new_lane_starts_at_the_present_not_at_the_backlog() -> None:
     stall it was built to fix.
     """
     client = _FakeRedisClient()
-    bus = _bus(client)
+    bus = _bus(client, supervise_interval_seconds=0.05)
     bus.subscribe(NotificationRequested.__name__, _noop, lane="scanner")
-    bus.stop()  # one pass, then out
-    await bus.run()
+
+    runner = asyncio.create_task(bus.run())
+    for _ in range(40):
+        await asyncio.sleep(0.05)
+        if any(group == "worker.scanner" for group, _ in client.groups_created):
+            break
+    bus.stop()
+    await asyncio.wait_for(runner, timeout=2.0)
+
     assert ("worker.scanner", "$") in client.groups_created
+
+
+# -- startup ordering: the bug that reached production -------------------------
+
+
+async def test_a_lane_registered_after_run_still_gets_a_loop() -> None:
+    """The regression, and it is not hypothetical — it was deployed.
+
+    ``ServiceProcess.run`` spawns ``bus.run()`` *before* ``await self.setup()``,
+    and ``setup()`` is where the twelve runtimes subscribe. The first version of
+    ``run`` gathered the lanes it could see at call time, which was none: the
+    Worker came up with one default-lane loop holding no handlers — reading and
+    acking every event without dispatching it — and twelve lanes with no loop.
+    The decision path stopped for the duration.
+
+    It passed a suite of twelve lane tests because every one of them subscribed
+    first and ran second. This one reverses that order, which is the order the
+    platform actually uses.
+    """
+    client = _FakeRedisClient()
+    bus = _bus(client, supervise_interval_seconds=0.05)
+
+    runner = asyncio.create_task(bus.run())
+    await asyncio.sleep(0.05)  # the bus is up, and nothing has subscribed yet
+
+    bus.subscribe(NotificationRequested.__name__, _noop, lane="scanner")
+    bus.subscribe(NotificationRequested.__name__, _noop, lane="committee")
+
+    for _ in range(40):  # give the supervisor a few turns
+        await asyncio.sleep(0.05)
+        if {"worker.scanner", "worker.committee"} <= {g for g, _ in client.groups_created}:
+            break
+
+    bus.stop()
+    await asyncio.wait_for(runner, timeout=2.0)
+
+    created = {group for group, _ in client.groups_created}
+    assert "worker.scanner" in created, "a lane registered after run() never got a loop"
+    assert "worker.committee" in created
+
+
+async def test_the_supervisor_shuts_every_lane_down() -> None:
+    """Stop must reach the lanes it started, not just the supervisor."""
+    client = _FakeRedisClient()
+    bus = _bus(client, supervise_interval_seconds=0.05)
+    bus.subscribe(NotificationRequested.__name__, _noop, lane="scanner")
+
+    runner = asyncio.create_task(bus.run())
+    await asyncio.sleep(0.15)
+    bus.stop()
+    await asyncio.wait_for(runner, timeout=2.0)
+
+    assert runner.done() and not runner.cancelled()
 
 
 # -- the actual point: one slow lane must not stall another --------------------

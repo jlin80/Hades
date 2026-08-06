@@ -370,6 +370,7 @@ class RedisEventBus:
         lag_warn_threshold: int = 5_000,
         lag_check_interval_seconds: float = 60.0,
         reclaim_after_seconds: float = 300.0,
+        supervise_interval_seconds: float = 0.5,
     ) -> None:
         self._provider = provider
         self._registry = registry
@@ -386,6 +387,11 @@ class RedisEventBus:
         # consumer takes it over. Comfortably longer than any handler chain,
         # short enough that a crashed process does not strand work for a day.
         self._reclaim_after_ms = int(max(30.0, reclaim_after_seconds) * 1000)
+        # How often the supervisor looks for lanes registered after it started.
+        # Short, because the gap it covers is startup: `setup()` registers the
+        # runtimes a fraction of a second after `run` is spawned, and a lane that
+        # waits seconds for its first loop is a lane that starts behind.
+        self._supervise_interval = max(0.05, supervise_interval_seconds)
         self._lanes: dict[str, _ConsumerLane] = {}
 
     @property
@@ -395,12 +401,20 @@ class RedisEventBus:
         The consumer loop is a bare ``asyncio`` task inside a process whose
         health is measured by a liveness file the *main* coroutine touches. So
         the loop can die while every probe stays green — which is exactly what
-        happened. Exposing the last turn of the loop lets a probe assert the bus
-        is consuming rather than assume it.
+        happened.
 
         The *oldest* rather than the newest, deliberately: with several lanes,
         reporting the freshest would let eleven healthy loops mask one that has
         stopped, which is the same masking this property exists to defeat.
+
+        **Nothing in the health path reads this yet** — only the bus load test
+        does. :class:`EventBusConsumerProbe` asks Redis how long each consumer
+        group has been idle, which is cross-process and does not depend on a
+        service's opinion of itself, but it can only see groups that *exist*: a
+        lane whose loop never started never called ``XGROUP CREATE``, so it is
+        absent rather than idle, and absent reads as nothing at all. That is the
+        gap the 2026-08-06 deploy fell through, and closing it means comparing
+        the lanes a process registered against the groups Redis actually holds.
         """
         stamps = [lane.last_cycle_at for lane in self._lanes.values()]
         if not stamps or any(stamp is None for stamp in stamps):
@@ -468,18 +482,58 @@ class RedisEventBus:
 
     # --- consumer lifecycle ---------------------------------------------------
     async def run(self) -> None:
-        """Run every lane's consumer loop concurrently until :meth:`stop`.
+        """Supervise every lane's consumer loop until :meth:`stop`.
 
-        ``gather`` rather than a sequential await: the lanes are the concurrency,
-        and awaiting them one at a time would rebuild by accident exactly the
-        serial pipeline this design exists to break. A process with no
-        subscriptions still gets the default lane, so ``run`` never returns
-        immediately and leaves a service looking like it is consuming when it
-        holds no loop at all.
+        **Supervise, not gather.** The first version of this method took the
+        lanes it found and gathered them, which reads as correct and is not:
+        ``ServiceProcess.run`` spawns this *before* ``setup()``, so at call time
+        the process has registered nothing and the snapshot is empty. Deployed,
+        that gave the Worker one default-lane loop with no handlers — reading and
+        acking every event without dispatching it — while the twelve lanes
+        registered a moment later in ``setup()`` sat with no loop at all. The
+        decision path stopped, and because the one loop *was* turning, both the
+        liveness probe and the lag metric looked better than before.
+
+        So the bus no longer depends on being started after its subscribers. It
+        polls for lanes it has not started yet and starts them, which makes the
+        ordering between ``run`` and ``subscribe`` irrelevant in both directions.
+        A lane whose loop ends while the bus is still running is restarted and
+        reported: ``_ConsumerLane.run`` is written so that nothing but shutdown
+        can end it, so a finished task means an assumption broke.
+
+        A process with no subscriptions still gets the default lane, so ``run``
+        never returns immediately and leaves a service looking like it consumes
+        when it holds no loop at all.
         """
         if not self._lanes:
             self._lane(DEFAULT_LANE)
-        await asyncio.gather(*(lane.run() for lane in self._lanes.values()))
+        tasks: dict[str, asyncio.Task[None]] = {}
+        try:
+            while not self._stop.is_set():
+                self._start_new_lanes(tasks)
+                try:
+                    await asyncio.wait_for(self._stop.wait(), timeout=self._supervise_interval)
+                except TimeoutError:
+                    continue
+        finally:
+            for task in tasks.values():
+                task.cancel()
+            await asyncio.gather(*tasks.values(), return_exceptions=True)
+
+    def _start_new_lanes(self, tasks: dict[str, asyncio.Task[None]]) -> None:
+        """Give a loop to every lane that has none, or has lost the one it had."""
+        for name in list(self._lanes):
+            existing = tasks.get(name)
+            if existing is not None and not existing.done():
+                continue
+            if existing is not None:
+                _logger.error(
+                    "redis_bus_lane_restarted",
+                    group=self.group_for(name),
+                    lane=name,
+                    note="a lane loop ended while the bus was still running",
+                )
+            tasks[name] = asyncio.create_task(self._lanes[name].run(), name=f"bus_lane_{name}")
 
     def stop(self) -> None:
         self._stop.set()
