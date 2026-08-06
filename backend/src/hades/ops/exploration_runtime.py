@@ -56,6 +56,7 @@ from hades.contexts.notification.domain.ports import Severity
 from hades.contexts.risk.infrastructure.exploration import ExplorationAdapter
 from hades.shared_kernel.cache import CacheService
 from hades.shared_kernel.domain.events import DomainEvent
+from hades.shared_kernel.events.bus import LaneBus
 from hades.shared_kernel.logging import get_logger
 
 _logger = get_logger("exploration.runtime")
@@ -70,6 +71,7 @@ class ExplorationRuntime:
 
     def __init__(self, container: Container) -> None:
         self._c = container
+        self._bus = LaneBus(container.event_bus, "exploration")
         self._stop = asyncio.Event()
         self._metrics = ExplorationMetrics(container.metrics)
         self._cache = CacheService(container.redis, namespace=EXPLORATION_STATUS_NAMESPACE)
@@ -82,7 +84,7 @@ class ExplorationRuntime:
             config,
             self._evidence,
             self._ledger,
-            event_bus=container.event_bus,
+            event_bus=self._bus,
             metrics=self._metrics,
         )
         self._register()
@@ -100,7 +102,7 @@ class ExplorationRuntime:
         return InMemoryExplorationLedger()
 
     def _register(self) -> None:
-        bus = self._c.event_bus
+        bus = self._bus
         bus.subscribe(ExplorationCompleted.__name__, self._on_completed)
         bus.subscribe(ExplorationBudgetExhausted.__name__, self._on_budget_exhausted)
 

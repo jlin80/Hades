@@ -41,6 +41,7 @@ from hades.contexts.portfolio.infrastructure.stores import (
 from hades.contexts.risk.domain.events import TradeApproved
 from hades.shared_kernel.cache import CacheService
 from hades.shared_kernel.domain.events import DomainEvent
+from hades.shared_kernel.events.bus import LaneBus
 from hades.shared_kernel.logging import get_logger
 
 _logger = get_logger("execution.runtime")
@@ -56,6 +57,7 @@ class ExecutionRuntime:
 
     def __init__(self, container: Container) -> None:
         self._c = container
+        self._bus = LaneBus(container.event_bus, "execution")
         self._stop = asyncio.Event()
         self._metrics = ExecutionMetrics(container.metrics)
         self._cache = CacheService(container.redis, namespace=EXECUTION_STATUS_NAMESPACE)
@@ -63,7 +65,7 @@ class ExecutionRuntime:
         repo = TradingModeRepository(container.database) if container.database is not None else None
         self._mode_service = TradingModeService(
             container.settings,
-            event_bus=container.event_bus,
+            event_bus=self._bus,
             notifier=container.notification,
             repository=repo,
         )
@@ -75,7 +77,7 @@ class ExecutionRuntime:
 
         self._bundle: ExecutionEngineBundle = build_execution_engine(
             container.settings,
-            event_bus=container.event_bus,
+            event_bus=self._bus,
             notifier=container.notification,
             mode_provider=self._resolve_mode,
             metrics=self._metrics,
@@ -118,7 +120,7 @@ class ExecutionRuntime:
         return PositionMonitor(
             engine=self._bundle.engine,
             price_oracle=self._oracle,
-            event_bus=self._c.event_bus,
+            event_bus=self._bus,
             interval_seconds=e.position_monitor_interval_seconds,
             max_slippage_bps=e.max_slippage_bps,
             # One switch turns the Strategy Engine on in both directions: it may
@@ -131,9 +133,9 @@ class ExecutionRuntime:
         return status.mode
 
     def _register(self) -> None:
-        self._c.event_bus.subscribe(TradeApproved.__name__, self._on_trade_approved)
+        self._bus.subscribe(TradeApproved.__name__, self._on_trade_approved)
         if self._monitor is not None:
-            self._monitor.register(self._c.event_bus)
+            self._monitor.register(self._bus)
 
     async def _on_trade_approved(self, event: DomainEvent) -> None:
         if not isinstance(event, TradeApproved):

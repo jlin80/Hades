@@ -129,6 +129,19 @@ def _spy_errors(monkeypatch) -> list[str]:  # type: ignore[no-untyped-def]
     return seen
 
 
+
+def _lane(bus: object) -> object:
+    """The default lane — where a subscription that names none lands.
+
+    These tests drive one consume cycle at a time, and a cycle now belongs to a
+    lane rather than to the bus: the bus owns several. Reaching for the lane is
+    the same white-box move the tests always made, one level down.
+    """
+    from hades.shared_kernel.events.redis_bus import DEFAULT_LANE
+
+    return bus._lane(DEFAULT_LANE)  # type: ignore[attr-defined]
+
+
 async def test_a_backlogged_consumer_logs_an_error(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     """The 59-hour silence is what this exists to break."""
     errors = _spy_errors(monkeypatch)
@@ -138,7 +151,7 @@ async def test_a_backlogged_consumer_logs_an_error(monkeypatch) -> None:  # type
         lag_check_interval_seconds=0.0,
     )
 
-    await bus._check_lag()
+    await _lane(bus)._check_lag()
 
     assert "redis_bus_consumer_behind" in errors
 
@@ -151,7 +164,7 @@ async def test_a_current_consumer_does_not_cry_wolf(monkeypatch) -> None:  # typ
         lag_check_interval_seconds=0.0,
     )
 
-    await bus._check_lag()
+    await _lane(bus)._check_lag()
 
     assert errors == []
 
@@ -171,9 +184,9 @@ async def test_the_lag_check_is_rate_limited() -> None:
     client = _Counting()
     bus = _redis_bus(client, lag_check_interval_seconds=3600.0)
 
-    await bus._check_lag()
-    await bus._check_lag()
-    await bus._check_lag()
+    await _lane(bus)._check_lag()
+    await _lane(bus)._check_lag()
+    await _lane(bus)._check_lag()
 
     assert client.info_calls == 1
 
@@ -186,7 +199,7 @@ async def test_a_failing_lag_check_never_breaks_the_bus() -> None:
             raise RuntimeError("redis is down")
 
     bus = _redis_bus(_Broken(), lag_check_interval_seconds=0.0)
-    await bus._check_lag()  # must not raise
+    await _lane(bus)._check_lag()  # must not raise
 
 
 # --- reclaiming what a dead consumer never acked ------------------------------
@@ -238,7 +251,7 @@ async def test_orphaned_messages_are_reclaimed_and_handled() -> None:
         seen.append(event.title)
 
     bus.subscribe("NotificationRequested", handler)
-    await bus._reclaim_stale()
+    await _lane(bus)._reclaim_stale()
 
     assert seen == ["orphan"], "a reclaimed message must go through the normal handlers"
     assert client.acked == ["1-1"], "and must be acked, or it is reclaimed forever"
@@ -249,7 +262,7 @@ async def test_reclaiming_respects_the_idle_threshold() -> None:
     client = _ClaimingClient([])
     bus = _redis_bus(client, reclaim_after_seconds=300.0)
 
-    await bus._reclaim_stale()
+    await _lane(bus)._reclaim_stale()
 
     assert client.autoclaims[0]["min_idle_time"] == 300_000
 
@@ -258,7 +271,7 @@ async def test_nothing_pending_is_a_silent_no_op() -> None:
     client = _ClaimingClient([])
     bus = _redis_bus(client, reclaim_after_seconds=60.0)
 
-    await bus._reclaim_stale()
+    await _lane(bus)._reclaim_stale()
 
     assert client.acked == []
 
@@ -269,7 +282,7 @@ async def test_a_failing_reclaim_never_breaks_the_bus() -> None:
             raise RuntimeError("redis is down")
 
     bus = _redis_bus(_Broken())
-    await bus._reclaim_stale()  # must not raise
+    await _lane(bus)._reclaim_stale()  # must not raise
 
 
 # --- the consumer loop that died in silence -----------------------------------
@@ -337,7 +350,7 @@ async def test_a_completed_cycle_is_recorded_so_a_dead_loop_is_visible() -> None
     bus = _redis_bus(client, lag_check_interval_seconds=0.0)
 
     assert bus.last_cycle_at is None
-    await bus._consume_once()
+    await _lane(bus)._consume_once()
     assert bus.last_cycle_at is not None, (
         "nothing recorded that the loop turned, so nothing can tell it stopped"
     )
@@ -359,7 +372,7 @@ async def test_an_unparseable_envelope_is_reported_not_raised(monkeypatch) -> No
         raise AssertionError("a message that cannot be rebuilt must not be dispatched")
 
     bus.subscribe("NotificationRequested", handler)
-    await bus._dispatch(_envelope_fields("poison"))  # must not raise
+    await _lane(bus)._dispatch(_envelope_fields("poison"))  # must not raise
 
     assert "redis_bus_rebuild_failed" in errors
     assert module is not None
@@ -387,7 +400,7 @@ async def test_a_reclaimed_message_that_was_trimmed_is_dropped_not_dispatched(
         seen.append(event.title)
 
     bus.subscribe("NotificationRequested", handler)
-    await bus._reclaim_stale()  # must not raise
+    await _lane(bus)._reclaim_stale()  # must not raise
 
     assert seen == ["real"], "the trimmed entry must be skipped, the real one handled"
     assert client.acked == ["1-1", "1-2"], (

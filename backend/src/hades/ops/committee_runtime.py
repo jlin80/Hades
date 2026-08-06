@@ -84,6 +84,7 @@ from hades.contexts.learning.infrastructure.stores import (
 )
 from hades.shared_kernel.cache import CacheService
 from hades.shared_kernel.domain.events import DomainEvent
+from hades.shared_kernel.events.bus import LaneBus
 from hades.shared_kernel.logging import get_logger
 
 _logger = get_logger("committee.runtime")
@@ -100,6 +101,7 @@ class CommitteeRuntime:
 
     def __init__(self, container: Container) -> None:
         self._c = container
+        self._bus = LaneBus(container.event_bus, "committee")
         self._stop = asyncio.Event()
         self._metrics = LearningMetrics(container.metrics)
         self._status_cache = CacheService(container.redis, namespace=COMMITTEE_STATUS_NAMESPACE)
@@ -110,9 +112,7 @@ class CommitteeRuntime:
         self._prediction_store: PredictionStore = self._build_prediction_store()
         self._outcome_store: OutcomeStore = self._build_outcome_store()
         self._dataset_store: DatasetStore = self._build_dataset_store()
-        self._registry_service = ModelRegistryService(
-            self._registry, self._c.event_bus, self._metrics
-        )
+        self._registry_service = ModelRegistryService(self._registry, self._bus, self._metrics)
         self._dataset_builder = DatasetBuilder(self._outcome_store)
         self._training = TrainingEngine()
         self._validation = ValidationEngine()
@@ -168,7 +168,7 @@ class CommitteeRuntime:
             regime=MarketRegimeClassifier(),
             confidence=ConfidenceEngine(),
             explainer=ExplanationBuilder(),
-            event_bus=self._c.event_bus,
+            event_bus=self._bus,
             metrics=self._metrics,
             prediction_store=self._prediction_store,
             shadows=shadows,
@@ -209,19 +209,19 @@ class CommitteeRuntime:
 
     def _register(self) -> None:
         builder = DecisionContextBuilder(self._feature_store, self._normalizer, self._c.database)
-        CommitteeHandler(self._manager, builder, self._enricher).register(self._c.event_bus)
-        self._feedback.register(self._c.event_bus)
-        self._c.event_bus.subscribe(CommitteePredictionGenerated.__name__, self._on_prediction)
+        CommitteeHandler(self._manager, builder, self._enricher).register(self._bus)
+        self._feedback.register(self._bus)
+        self._bus.subscribe(CommitteePredictionGenerated.__name__, self._on_prediction)
         # The learning loop's return leg. Knowledge does the joining (a decision's
         # frozen evidence + its realised outcome); this is where ground truth
         # finally reaches the ledger the Dataset Builder reads.
         if self._c.settings.knowledge.feed_committee:
-            self._c.event_bus.subscribe(LessonLearned.__name__, self._on_lesson)
+            self._bus.subscribe(LessonLearned.__name__, self._on_lesson)
         # A promotion that the runtime never notices is a promotion that did not
         # happen. ``set_active`` used to run only at startup, so a promoted model
         # changed nothing until the worker was restarted — the human-gated
         # promotion machinery worked perfectly and had no effect.
-        self._c.event_bus.subscribe(ModelPromoted.__name__, self._on_model_promoted)
+        self._bus.subscribe(ModelPromoted.__name__, self._on_model_promoted)
 
     async def _on_lesson(self, event: DomainEvent) -> None:
         """Write a completed lesson into the outcome ledger.

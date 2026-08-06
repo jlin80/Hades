@@ -53,6 +53,7 @@ from hades.contexts.scanner.infrastructure.seen_registry import RedisSeenTokenRe
 from hades.contexts.scanner.infrastructure.sources import build_sources
 from hades.shared_kernel.cache import CacheService
 from hades.shared_kernel.domain.identifiers import new_id
+from hades.shared_kernel.events.bus import LaneBus
 from hades.shared_kernel.logging import get_logger
 from hades.shared_kernel.solana import RpcManager, RpcSwitch
 from hades.shared_kernel.solana.rpc_manager import build_endpoints
@@ -72,6 +73,7 @@ class ScannerRuntime:
 
     def __init__(self, container: Container) -> None:
         self._c = container
+        self._bus = LaneBus(container.event_bus, "scanner")
         self._stop = asyncio.Event()
         self._metrics = ScannerMetrics(container.metrics)
         self._features_total = 0
@@ -96,7 +98,7 @@ class ScannerRuntime:
     def _build_rpc(self) -> RpcManager:
         s = self._c.settings
         endpoints = build_endpoints(s.rpc, s.solana.rpc_http_url)
-        bus = self._c.event_bus
+        bus = self._bus
 
         async def on_switch(switch: RpcSwitch) -> None:
             await bus.publish(
@@ -145,7 +147,7 @@ class ScannerRuntime:
             QualityValidator(),
             self._repository(),
             settings=s.pipeline,
-            event_bus=self._c.event_bus,
+            event_bus=self._bus,
             metrics=self._metrics,
         )
 
@@ -162,7 +164,7 @@ class ScannerRuntime:
             RedisSeenTokenRegistry(self._c.redis, ttl_seconds=s.scanner.dedup_ttl_seconds),
             self._pipeline.enqueue,
             settings=s.scanner,
-            event_bus=self._c.event_bus,
+            event_bus=self._bus,
             metrics=self._metrics,
         )
 
@@ -170,17 +172,17 @@ class ScannerRuntime:
         s = self._c.settings
         engine = FeatureEngine(
             self._feature_store(),
-            event_bus=self._c.event_bus,
+            event_bus=self._bus,
             schema_version=s.feature.schema_version,
             on_computed=self._count_features,
         )
         FeatureComputationHandler(
             engine, HintInputsAssembler(), on_latency=self._observe_features_latency
-        ).register(self._c.event_bus)
+        ).register(self._bus)
         if s.pipeline.snapshot_enabled:
             HistoryBuilder(
                 self._snapshot_store(), schema_version=s.feature.schema_version
-            ).register(self._c.event_bus)
+            ).register(self._bus)
 
     # -- status ---------------------------------------------------------------
 

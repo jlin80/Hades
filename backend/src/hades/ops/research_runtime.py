@@ -57,6 +57,7 @@ from hades.contexts.research.infrastructure.stores import (
 )
 from hades.shared_kernel.cache import CacheService
 from hades.shared_kernel.domain.events import DomainEvent
+from hades.shared_kernel.events.bus import LaneBus
 from hades.shared_kernel.logging import get_logger
 
 _logger = get_logger("research.runtime")
@@ -71,6 +72,7 @@ class ResearchRuntime:
 
     def __init__(self, container: Container) -> None:
         self._c = container
+        self._bus = LaneBus(container.event_bus, "research")
         self._stop = asyncio.Event()
         self._cache = CacheService(container.redis, namespace=RESEARCH_STATUS_NAMESPACE)
         rs = container.settings.research
@@ -96,7 +98,7 @@ class ResearchRuntime:
             self._reader = InMemoryHistoricalReader([])
 
         self._manager = ResearchManager(
-            event_bus=container.event_bus,
+            event_bus=self._bus,
             notifier=container.notification,
             knowledge=KnowledgeBase(self._knowledge_store),
             experiment_store=self._experiments,
@@ -129,7 +131,7 @@ class ResearchRuntime:
 
     def _register(self) -> None:
         if self._c.settings.research.shadow_enabled:
-            self._c.event_bus.subscribe(FeaturesComputed.__name__, self._on_features_computed)
+            self._bus.subscribe(FeaturesComputed.__name__, self._on_features_computed)
 
     async def _on_features_computed(self, event: DomainEvent) -> None:
         await self._shadow_handler.on_features_computed(event)
@@ -163,7 +165,7 @@ class ResearchRuntime:
             try:
                 for shadow in self._shadow_handler.shadows:
                     await self._shadows.save(shadow)
-                    await self._c.event_bus.publish(
+                    await self._bus.publish(
                         ShadowStrategyUpdated(
                             aggregate_id=shadow.shadow_id,
                             shadow_id=str(shadow.shadow_id),

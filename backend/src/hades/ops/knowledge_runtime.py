@@ -65,6 +65,7 @@ from hades.contexts.knowledge.infrastructure.stores import (
 )
 from hades.shared_kernel.cache import CacheService
 from hades.shared_kernel.domain.events import DomainEvent
+from hades.shared_kernel.events.bus import LaneBus
 from hades.shared_kernel.logging import get_logger
 
 _logger = get_logger("knowledge.runtime")
@@ -179,6 +180,7 @@ class KnowledgeRuntime:
 
     def __init__(self, container: Container) -> None:
         self._c = container
+        self._bus = LaneBus(container.event_bus, "knowledge")
         self._stop = asyncio.Event()
         self._metrics = KnowledgeMetrics(container.metrics)
         self._cache = CacheService(container.redis, namespace=KNOWLEDGE_STATUS_NAMESPACE)
@@ -187,13 +189,11 @@ class KnowledgeRuntime:
         self._lessons: LessonStore = self._build_lesson_store()
         self._journal_store: DecisionJournalStore = self._build_journal_store()
 
-        self._recorder = KnowledgeRecorder(
-            self._store, event_bus=container.event_bus, metrics=self._metrics
-        )
+        self._recorder = KnowledgeRecorder(self._store, event_bus=self._bus, metrics=self._metrics)
         self._journal = DecisionJournal(
             self._journal_store,
             self._lessons,
-            event_bus=container.event_bus,
+            event_bus=self._bus,
             metrics=self._metrics,
         )
 
@@ -433,7 +433,7 @@ class KnowledgeRuntime:
     }
 
     def _register(self) -> None:
-        bus = self._c.event_bus
+        bus = self._bus
         for name in self._OBSERVED:
             bus.subscribe(name, self._on_observed)
         # The decision pipeline. PositionClosed is subscribed twice on purpose:

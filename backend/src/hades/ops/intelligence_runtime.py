@@ -62,6 +62,7 @@ from hades.contexts.intelligence.infrastructure.wallet_repository import (
 from hades.contexts.security.infrastructure.onchain_reader import RpcOnChainReader
 from hades.shared_kernel.cache import CacheService
 from hades.shared_kernel.domain.events import DomainEvent
+from hades.shared_kernel.events.bus import LaneBus
 from hades.shared_kernel.logging import get_logger
 from hades.shared_kernel.solana import RpcManager
 from hades.shared_kernel.solana.rpc_manager import build_endpoints
@@ -80,6 +81,7 @@ class IntelligenceRuntime:
 
     def __init__(self, container: Container) -> None:
         self._c = container
+        self._bus = LaneBus(container.event_bus, "intelligence")
         self._stop = asyncio.Event()
         self._metrics = IntelligenceMetrics(container.metrics)
         self._status_cache = CacheService(container.redis, namespace=INTELLIGENCE_STATUS_NAMESPACE)
@@ -142,7 +144,7 @@ class IntelligenceRuntime:
             relationships=self._relationships(),
             clusters=self._cluster_store(),
             knowledge_base=self._knowledge_base(),
-            event_bus=self._c.event_bus,
+            event_bus=self._bus,
             metrics=self._metrics,
         )
 
@@ -158,9 +160,9 @@ class IntelligenceRuntime:
         )
 
     def _register(self) -> None:
-        WalletIntelligenceHandler(self._engine, self._assembler).register(self._c.event_bus)
-        self._c.event_bus.subscribe(WalletRegistered.__name__, self._on_registered)
-        self._c.event_bus.subscribe(ClusterCreated.__name__, self._on_cluster)
+        WalletIntelligenceHandler(self._engine, self._assembler).register(self._bus)
+        self._bus.subscribe(WalletRegistered.__name__, self._on_registered)
+        self._bus.subscribe(ClusterCreated.__name__, self._on_cluster)
 
     # -- dashboard stats ------------------------------------------------------
 

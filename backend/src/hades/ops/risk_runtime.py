@@ -55,6 +55,7 @@ from hades.contexts.risk.infrastructure.stores import (
 )
 from hades.shared_kernel.cache import CacheService
 from hades.shared_kernel.domain.events import DomainEvent
+from hades.shared_kernel.events.bus import LaneBus
 from hades.shared_kernel.logging import get_logger
 
 _logger = get_logger("risk.runtime")
@@ -72,6 +73,7 @@ class RiskRuntime:
 
     def __init__(self, container: Container, exploration: ExplorationPort | None = None) -> None:
         self._c = container
+        self._bus = LaneBus(container.event_bus, "risk")
         self._stop = asyncio.Event()
         self._risk_metrics = RiskMetrics(container.metrics)
         self._pf_metrics = PortfolioMetrics(container.metrics)
@@ -87,7 +89,7 @@ class RiskRuntime:
             starting_balance_usd=container.settings.paper.starting_balance_usd,
             reserve_pct=container.settings.risk.liquidity_reserve_pct,
             mode=container.settings.trading_mode.value,
-            event_bus=container.event_bus,
+            event_bus=self._bus,
             history=self._history,
             state_store=self._portfolio_store,
         )
@@ -97,7 +99,7 @@ class RiskRuntime:
         self._manager: RiskManager = build_risk_manager(
             risk_config_from_settings(container.settings),
             exploration=exploration,
-            event_bus=container.event_bus,
+            event_bus=self._bus,
             audit=self._audit,
             state_store=self._state_store,
             notifier=container.notification,
@@ -136,13 +138,13 @@ class RiskRuntime:
         # Subscribe the facts cache first: it must have recorded a token's
         # security/wallet verdict before the committee prediction for that same
         # token arrives and the Risk Manager asks for it.
-        self._facts.register(self._c.event_bus)
-        self._portfolio.register(self._c.event_bus)
-        RiskHandler(self._manager, self._builder, self._portfolio).register(self._c.event_bus)
+        self._facts.register(self._bus)
+        self._portfolio.register(self._bus)
+        RiskHandler(self._manager, self._builder, self._portfolio).register(self._bus)
         # Feed closed-trade outcomes to the Kill Switch (win resets the streak).
-        self._c.event_bus.subscribe(PositionClosed.__name__, self._on_position_closed)
+        self._bus.subscribe(PositionClosed.__name__, self._on_position_closed)
         # Operator commands issued from the API travel here as events.
-        self._c.event_bus.subscribe(RiskControlCommandIssued.__name__, self._on_control_command)
+        self._bus.subscribe(RiskControlCommandIssued.__name__, self._on_control_command)
 
     async def _on_control_command(self, event: DomainEvent) -> None:
         if not isinstance(event, RiskControlCommandIssued):

@@ -73,6 +73,7 @@ from hades.contexts.security.infrastructure.token_facts import (
 )
 from hades.shared_kernel.cache import CacheService
 from hades.shared_kernel.domain.events import DomainEvent
+from hades.shared_kernel.events.bus import LaneBus
 from hades.shared_kernel.logging import get_logger
 from hades.shared_kernel.solana import RpcManager
 from hades.shared_kernel.solana.rpc_manager import build_endpoints
@@ -91,6 +92,7 @@ class SecurityRuntime:
 
     def __init__(self, container: Container) -> None:
         self._c = container
+        self._bus = LaneBus(container.event_bus, "security")
         self._stop = asyncio.Event()
         self._metrics = SecurityMetrics(container.metrics)
         self._status_cache = CacheService(container.redis, namespace=SECURITY_STATUS_NAMESPACE)
@@ -186,7 +188,7 @@ class SecurityRuntime:
             whitelist=WhitelistEngine(registry),
             repository=self._repository(),
             developer_store=self._developer_store(),
-            event_bus=self._c.event_bus,
+            event_bus=self._bus,
             metrics=self._metrics,
             auto_blacklist_honeypots=sec.auto_blacklist_honeypots,
         )
@@ -205,9 +207,9 @@ class SecurityRuntime:
         )
 
     def _register(self) -> None:
-        SecurityAnalysisHandler(self._engine, self._assembler).register(self._c.event_bus)
-        self._c.event_bus.subscribe(TokenApproved.__name__, self._on_approved)
-        self._c.event_bus.subscribe(TokenRejected.__name__, self._on_rejected)
+        SecurityAnalysisHandler(self._engine, self._assembler).register(self._bus)
+        self._bus.subscribe(TokenApproved.__name__, self._on_approved)
+        self._bus.subscribe(TokenRejected.__name__, self._on_rejected)
 
     # -- dashboard stats ------------------------------------------------------
 

@@ -14,6 +14,7 @@ import asyncio
 from hades.bootstrap import Container
 from hades.contexts.monitoring.application.performance_monitor import PerformanceMonitor
 from hades.shared_kernel.cache import CacheService
+from hades.shared_kernel.events.bus import LaneBus
 from hades.shared_kernel.logging import get_logger
 
 _logger = get_logger("performance.runtime")
@@ -29,6 +30,7 @@ class PerformanceRuntime:
 
     def __init__(self, container: Container) -> None:
         self._c = container
+        self._bus = LaneBus(container.event_bus, "performance")
         self._stop = asyncio.Event()
         self._monitor = PerformanceMonitor(container.metrics)
         self._cache = CacheService(container.redis, namespace=PERFORMANCE_NAMESPACE)
@@ -38,7 +40,7 @@ class PerformanceRuntime:
         return self._monitor
 
     async def start(self) -> list[asyncio.Task[None]]:
-        self._monitor.register(self._c.event_bus)
+        self._monitor.register(self._bus)
         _logger.info("performance_runtime_started")
         return [asyncio.create_task(self._publish_loop(), name="performance-status")]
 

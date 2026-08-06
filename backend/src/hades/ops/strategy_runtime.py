@@ -32,6 +32,7 @@ from hades.contexts.strategy.infrastructure.stores import (
     InMemorySignalStore,
 )
 from hades.shared_kernel.cache import CacheService
+from hades.shared_kernel.events.bus import LaneBus
 from hades.shared_kernel.logging import get_logger
 
 _logger = get_logger("strategy.runtime")
@@ -47,6 +48,7 @@ class StrategyRuntime:
 
     def __init__(self, container: Container) -> None:
         self._c = container
+        self._bus = LaneBus(container.event_bus, "strategy")
         self._stop = asyncio.Event()
         self._metrics = StrategyMetrics(container.metrics)
         self._cache = CacheService(container.redis, namespace=STRATEGY_STATUS_NAMESPACE)
@@ -54,14 +56,14 @@ class StrategyRuntime:
         self._signals = InMemorySignalStore()
         self._bundle: StrategyEngineBundle = build_strategy_engine(
             container.settings,
-            event_bus=container.event_bus,
+            event_bus=self._bus,
             notifier=container.notification,
             metrics=self._metrics,
             performance_store=self._performance,
             signal_store=self._signals,
         )
         self._handler = StrategyHandler(self._bundle.engine, self._bundle.context_builder)
-        self._handler.register(container.event_bus)
+        self._handler.register(self._bus)
 
     @property
     def bundle(self) -> StrategyEngineBundle:

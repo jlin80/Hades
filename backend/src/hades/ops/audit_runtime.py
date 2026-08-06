@@ -18,6 +18,7 @@ from hades.contexts.audit.application.recorder import AuditRecorder
 from hades.contexts.audit.application.subscriber import AuditSubscriber
 from hades.contexts.audit.domain.ports import AuditStore
 from hades.contexts.audit.infrastructure.store import InMemoryAuditStore, PostgresAuditStore
+from hades.shared_kernel.events.bus import LaneBus
 from hades.shared_kernel.logging import get_logger
 
 _logger = get_logger("audit.runtime")
@@ -28,6 +29,7 @@ class AuditRuntime:
 
     def __init__(self, container: Container) -> None:
         self._c = container
+        self._bus = LaneBus(container.event_bus, "audit")
         self._store: AuditStore = (
             PostgresAuditStore(container.database)
             if container.database is not None
@@ -41,7 +43,7 @@ class AuditRuntime:
         return self._recorder
 
     async def start(self) -> list[asyncio.Task[None]]:
-        self._subscriber.register(self._c.event_bus)
+        self._subscriber.register(self._bus)
         _logger.info("audit_runtime_started", backend=type(self._store).__name__)
         return []
 
