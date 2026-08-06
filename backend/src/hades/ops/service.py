@@ -149,13 +149,65 @@ class ServiceProcess:
         """
 
     async def _liveness_loop(self) -> None:
+        """Heartbeat, but only while the service is actually consuming.
+
+        The heartbeat used to be unconditional, and that is precisely how this
+        platform has twice reported perfect health while doing nothing: once when
+        the Worker's consumer loop died and four days passed, and again on
+        2026-08-06 when nine of twelve lanes came up with no loop at all and the
+        decision path stopped. In both cases the process was alive and the file
+        said so, truthfully and uselessly. "The process exists" was never the
+        question worth answering.
+
+        So the heartbeat is now a claim about consumption. Withholding the touch
+        ages the liveness file, the container's healthcheck fails, and the
+        Watchdog says so out loud — the existing path, finally carrying the
+        signal that matters. It cannot cause a restart storm: the compose restart
+        policy is ``unless-stopped``, which acts on exit and not on health, and
+        ``start_period`` covers boot. A stalled service goes loudly unhealthy and
+        keeps running for you to look at.
+        """
         interval = self._container.settings.watchdog.heartbeat_interval_seconds
         while not self._stop.is_set():
-            self._liveness.touch()
+            stalled = self._stalled_lanes()
+            if stalled:
+                self._log.error(
+                    "liveness_withheld_bus_stalled",
+                    role=self.role,
+                    lanes=list(stalled),
+                    note=(
+                        "not consuming; the heartbeat is withheld so this becomes "
+                        "unhealthy rather than looking fine while doing nothing"
+                    ),
+                )
+            else:
+                self._liveness.touch()
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=interval)
             except TimeoutError:
                 continue
+
+    def _stalled_lanes(self) -> tuple[str, ...]:
+        """Lanes this process registered that are not consuming. Never raises.
+
+        Health reporting must not be able to break the thing it reports on, so a
+        fault here is swallowed and treated as "nothing to report" — the failure
+        mode is the old behaviour, not a service that cannot heartbeat.
+        """
+        bus = self._container.event_bus
+        if not isinstance(bus, RedisEventBus):
+            return ()
+        try:
+            # The bus defaults match EventBusConsumerProbe's 300s deliberately.
+            # `liveness_max_age_seconds` (60s) is the wrong dial here: a lane
+            # reads a batch of 50 and only stamps its cycle afterwards, so a run
+            # of slow storage-bound handlers can legitimately put a minute
+            # between cycles. Judging that as stalled would trade a blind spot
+            # for a flapping container.
+            return bus.stalled_lanes()
+        except Exception as exc:
+            self._log.warning("liveness_stall_check_failed", error=str(exc))
+            return ()
 
     async def _shutdown(self) -> None:
         self._log.info("service_stopping", role=self.role)

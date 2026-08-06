@@ -97,6 +97,9 @@ class _ConsumerLane:
         self._reclaim_cursor = "0-0"
         self._last_lag_check = 0.0
         self._last_cycle_at: float | None = None
+        #: When this lane came into existence. A lane that has never turned is
+        #: only *late* relative to something, and this is that something.
+        self.registered_at = time.time()
 
     @property
     def group(self) -> str:
@@ -426,6 +429,44 @@ class RedisEventBus:
     @property
     def lanes(self) -> tuple[str, ...]:
         return tuple(sorted(self._lanes))
+
+    def stalled_lanes(
+        self, *, max_idle_seconds: float = 300.0, startup_grace_seconds: float = 90.0
+    ) -> tuple[str, ...]:
+        """Registered lanes that are not consuming, with the reason for each.
+
+        This is the answer to the question the platform could not previously ask
+        about itself. :class:`EventBusConsumerProbe` asks Redis how idle each
+        consumer *group* is, which is cross-process and truthful but can only
+        report on groups that exist — and a lane whose loop never started never
+        created its group. On 2026-08-06 nine runtimes were subscribed to lanes
+        with no loop, their groups were therefore absent rather than idle, and
+        every container reported healthy for the duration.
+
+        Absence is exactly what this catches, because it starts from the lanes
+        the process *registered* rather than from what Redis happens to hold. It
+        must run in-process for that reason: the registration only exists here.
+
+        Two ways to be stalled, and the grace period matters for the first. A
+        lane that has never turned is not yet wrong — it was created moments ago
+        during ``setup()`` and its loop starts on the supervisor's next pass — so
+        it only counts once it has had ``startup_grace_seconds`` to get going.
+        A lane that turned and then stopped is judged on idle time instead.
+        """
+        now = time.time()
+        stalled: list[str] = []
+        for name in sorted(self._lanes):
+            lane = self._lanes[name]
+            turned = lane.last_cycle_at
+            if turned is None:
+                waited = now - lane.registered_at
+                if waited > startup_grace_seconds:
+                    stalled.append(f"{name}: never consumed, {waited:.0f}s after registering")
+                continue
+            idle = now - turned
+            if idle > max_idle_seconds:
+                stalled.append(f"{name}: last cycle {idle:.0f}s ago")
+        return tuple(stalled)
 
     def group_for(self, lane: str) -> str:
         """The Redis consumer-group name backing ``lane``."""

@@ -18,6 +18,7 @@ lane that has never turned must never read as healthy.
 from __future__ import annotations
 
 import asyncio
+import time
 
 import orjson
 
@@ -344,3 +345,65 @@ async def test_the_lane_view_forwards_publishing_untouched() -> None:
     await view.publish("one")  # type: ignore[arg-type]
     await view.publish_many(["two", "three"])  # type: ignore[arg-type]
     assert published == ["one", "two", "three"]
+
+
+# -- the blind spot: a lane that never started is absent, not idle -------------
+
+
+def test_a_lane_that_has_never_turned_is_stalled_once_its_grace_runs_out() -> None:
+    """What EventBusConsumerProbe structurally cannot see.
+
+    That probe reads how idle each consumer *group* is. A lane whose loop never
+    started never called ``XGROUP CREATE``, so its group does not exist — absent
+    rather than idle, and absent trips nothing. On 2026-08-06 that is how nine
+    dead runtimes coexisted with 9/9 healthy containers. This check starts from
+    the lanes the process registered instead, which is why it must run in-process.
+    """
+    bus = _bus(_FakeRedisClient())
+    bus.subscribe(NotificationRequested.__name__, _noop, lane="scanner")
+    bus._lane("scanner").registered_at = time.time() - 600
+
+    stalled = bus.stalled_lanes(startup_grace_seconds=90.0)
+
+    assert len(stalled) == 1
+    assert stalled[0].startswith("scanner: never consumed")
+
+
+def test_a_freshly_registered_lane_is_given_time_before_it_counts() -> None:
+    """setup() registers lanes a fraction of a second before their first loop."""
+    bus = _bus(_FakeRedisClient())
+    bus.subscribe(NotificationRequested.__name__, _noop, lane="scanner")
+    assert bus.stalled_lanes(startup_grace_seconds=90.0) == ()
+
+
+async def test_a_lane_that_turned_recently_is_not_stalled() -> None:
+    bus = _bus(_FakeRedisClient())
+    bus.subscribe(NotificationRequested.__name__, _noop, lane="scanner")
+    await bus._lane("scanner")._consume_once()
+    assert bus.stalled_lanes() == ()
+
+
+async def test_a_lane_that_turned_and_then_stopped_is_stalled() -> None:
+    """The four-day outage: a loop that ran, stopped, and told no one."""
+    bus = _bus(_FakeRedisClient())
+    bus.subscribe(NotificationRequested.__name__, _noop, lane="scanner")
+    await bus._lane("scanner")._consume_once()
+    bus._lane("scanner")._last_cycle_at = time.time() - 4_000
+
+    stalled = bus.stalled_lanes(max_idle_seconds=300.0)
+
+    assert len(stalled) == 1
+    assert "last cycle" in stalled[0]
+
+
+def test_every_stalled_lane_is_named_not_just_the_first() -> None:
+    """Nine were dead at once; a report naming one would have understated it."""
+    bus = _bus(_FakeRedisClient())
+    for name in ("scanner", "security", "committee"):
+        bus.subscribe(NotificationRequested.__name__, _noop, lane=name)
+        bus._lane(name).registered_at = time.time() - 600
+
+    stalled = bus.stalled_lanes(startup_grace_seconds=90.0)
+
+    assert len(stalled) == 3
+    assert {s.split(":")[0] for s in stalled} == {"scanner", "security", "committee"}
