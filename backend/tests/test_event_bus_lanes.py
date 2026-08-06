@@ -36,6 +36,7 @@ class _FakeRedisClient:
     def __init__(self, batches: dict[str, list[tuple[str, dict[str, str]]]] | None = None) -> None:
         self.groups_created: list[tuple[str, str]] = []
         self.acked: list[tuple[str, str]] = []
+        self.autoclaims = 0
         self._batches = batches or {}
 
     async def xgroup_create(self, stream: str, group: str, id: str = "$", **_: object) -> None:
@@ -56,6 +57,7 @@ class _FakeRedisClient:
         return 1
 
     async def xautoclaim(self, *a: object, **k: object) -> tuple[str, list[object]]:
+        self.autoclaims += 1
         return ("0-0", [])
 
     async def xinfo_groups(self, stream: str) -> list[dict[str, object]]:
@@ -407,3 +409,45 @@ def test_every_stalled_lane_is_named_not_just_the_first() -> None:
 
     assert len(stalled) == 3
     assert {s.split(":")[0] for s in stalled} == {"scanner", "security", "committee"}
+
+
+# -- what multiplying the loops multiplied -------------------------------------
+
+
+async def test_reclaiming_is_rate_limited_not_once_per_cycle() -> None:
+    """The regression that cost the second deploy its throughput.
+
+    Reclaiming ran on every cycle, which one loop could afford. Twelve could not:
+    on the live deployment XAUTOCLAIM calls tracked XREADGROUP calls 1:1 —
+    620,079 against 620,330 — at 269 microseconds each, 167 seconds of Redis CPU
+    hunting for orphans that only appear after a restart, and the lanes fell
+    behind at ~2 events/s while paying for it.
+
+    Multiplying the loops multiplied everything inside them. This is the guard
+    that the multiplication does not silently reintroduce.
+    """
+    client = _FakeRedisClient()
+    bus = _bus(client, reclaim_check_interval_seconds=60.0)
+    bus.subscribe(NotificationRequested.__name__, _noop, lane="scanner")
+    lane = bus._lane("scanner")
+
+    for _ in range(20):
+        await lane._consume_once()
+
+    assert client.autoclaims == 1, (
+        f"20 cycles issued {client.autoclaims} XAUTOCLAIM calls; the interval is not holding"
+    )
+
+
+async def test_reclaiming_resumes_once_the_interval_passes() -> None:
+    """Rate-limited, not disabled: orphaned messages must still be picked up."""
+    client = _FakeRedisClient()
+    bus = _bus(client, reclaim_check_interval_seconds=60.0)
+    bus.subscribe(NotificationRequested.__name__, _noop, lane="scanner")
+    lane = bus._lane("scanner")
+
+    await lane._consume_once()
+    lane._last_reclaim_check -= 120.0  # the interval has elapsed
+    await lane._consume_once()
+
+    assert client.autoclaims == 2

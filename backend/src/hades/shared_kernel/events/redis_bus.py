@@ -79,6 +79,7 @@ class _ConsumerLane:
         lag_warn: int,
         lag_interval: float,
         reclaim_after_ms: int,
+        reclaim_interval: float,
     ) -> None:
         self.name = name
         self._group = group
@@ -92,10 +93,12 @@ class _ConsumerLane:
         self._lag_warn = lag_warn
         self._lag_interval = lag_interval
         self._reclaim_after_ms = reclaim_after_ms
+        self._reclaim_interval = reclaim_interval
         self._handlers: dict[str, list[EventHandler]] = {}
         self._group_ready = False
         self._reclaim_cursor = "0-0"
         self._last_lag_check = 0.0
+        self._last_reclaim_check = 0.0
         self._last_cycle_at: float | None = None
         #: When this lane came into existence. A lane that has never turned is
         #: only *late* relative to something, and this is that something.
@@ -211,7 +214,26 @@ class _ConsumerLane:
         cursor walks the pending list across calls. Handlers are already required
         to be idempotent — the bus has always been at-least-once — so a reclaim
         that duplicates work is safe by contract.
+
+        **Rate-limited, and that is not a micro-optimisation.** This ran on every
+        cycle when a process had one loop, which was affordable. Lanes made it
+        twelve loops, and the cost came with them: measured on the live
+        deployment, ``XAUTOCLAIM`` calls tracked ``XREADGROUP`` calls exactly
+        1:1 — 620,079 against 620,330 — at 269 µs each, which is 167 seconds of
+        Redis CPU spent looking for orphans that appear only after a restart.
+        The lanes then fell behind at ~2 events/s. Multiplying the loops
+        multiplied everything inside them, and this was the part that did not
+        survive the multiplication.
+
+        The interval is safe because the work is rare and already delayed:
+        nothing becomes reclaimable until it has been idle for
+        ``reclaim_after_seconds`` (300s by default), so checking every 30s adds
+        at most a fraction of that to a message's wait.
         """
+        now = time.monotonic()
+        if now - self._last_reclaim_check < self._reclaim_interval:
+            return
+        self._last_reclaim_check = now
         try:
             result = await self._provider.client().xautoclaim(
                 self._stream,
@@ -373,6 +395,7 @@ class RedisEventBus:
         lag_warn_threshold: int = 5_000,
         lag_check_interval_seconds: float = 60.0,
         reclaim_after_seconds: float = 300.0,
+        reclaim_check_interval_seconds: float = 30.0,
         supervise_interval_seconds: float = 0.5,
     ) -> None:
         self._provider = provider
@@ -390,6 +413,9 @@ class RedisEventBus:
         # consumer takes it over. Comfortably longer than any handler chain,
         # short enough that a crashed process does not strand work for a day.
         self._reclaim_after_ms = int(max(30.0, reclaim_after_seconds) * 1000)
+        # See _ConsumerLane._reclaim_stale: unbounded, this cost 167s of Redis CPU
+        # once there were twelve loops paying it on every turn.
+        self._reclaim_interval = max(1.0, reclaim_check_interval_seconds)
         # How often the supervisor looks for lanes registered after it started.
         # Short, because the gap it covers is startup: `setup()` registers the
         # runtimes a fraction of a second after `run` is spawned, and a lane that
@@ -488,6 +514,7 @@ class RedisEventBus:
                 lag_warn=self._lag_warn,
                 lag_interval=self._lag_interval,
                 reclaim_after_ms=self._reclaim_after_ms,
+                reclaim_interval=self._reclaim_interval,
             )
             self._lanes[name] = lane
         return lane
