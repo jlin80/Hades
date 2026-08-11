@@ -190,6 +190,15 @@ class PersistedPortfolio(ValueObject):
     #: Recent (opened_at, strategy) pairs behind the trade-rate limits.
     opens: tuple[tuple[datetime, str], ...] = ()
     equity_curve: tuple[float, ...] = ()
+    #: Ids of the money-mutating events already folded into this book.
+    #:
+    #: Persisted rather than kept in memory because the redelivery this guards
+    #: against is *caused* by the restart: a container killed mid-dispatch leaves
+    #: messages unacked, and the orphan reclaim hands them back minutes after the
+    #: process comes up. A guard that reset on startup would be empty at exactly
+    #: the moment it is needed. Empty by default so snapshots written before this
+    #: field existed still load.
+    applied_events: tuple[str, ...] = ()
     saved_at: datetime | None = None
 
 

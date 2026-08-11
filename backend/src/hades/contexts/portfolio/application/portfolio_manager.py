@@ -15,7 +15,7 @@ fills and keeps the numbers honest.
 
 from __future__ import annotations
 
-from collections import deque
+from collections import OrderedDict, deque
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -51,6 +51,18 @@ _EQUITY_CURVE_MAX = 10_000
 #: streak and the rolling PnL windows all read from the recent tail; keeping the
 #: whole history here would grow one JSONB row without bound.
 _CLOSED_TRADES_MAX = 1_000
+#: How many applied event ids the idempotency guard remembers. The bus is
+#: at-least-once and ``XAUTOCLAIM`` re-dispatches anything a killed container
+#: left unacked, so a money-mutating handler that is not idempotent will
+#: double-count on the next restart.
+#:
+#: The bound is deliberately small, and the reason is the write path rather than
+#: memory: this whole snapshot is re-serialised into one JSONB row on *every*
+#: recompute, so anything kept here is paid again on each mark-to-market tick.
+#: Only opens and closes are guarded — a few thousand events over the platform's
+#: lifetime so far — and a reclaim only reaches messages idle beyond 300 seconds,
+#: so the window that must be covered is minutes, not weeks.
+_APPLIED_EVENTS_MAX = 2_000
 
 
 class PortfolioManager:
@@ -86,6 +98,8 @@ class PortfolioManager:
         self._closed: list[ClosedTrade] = []
         self._opens: deque[tuple[datetime, str]] = deque(maxlen=1000)
         self._equity_curve: deque[float] = deque([starting_balance_usd], maxlen=_EQUITY_CURVE_MAX)
+        #: Ids of the money-mutating events already folded into the book above.
+        self._applied: OrderedDict[str, None] = OrderedDict()
 
     def register(self, event_bus: EventBus) -> None:
         event_bus.subscribe(PositionOpened.__name__, self._on_opened)
@@ -96,6 +110,8 @@ class PortfolioManager:
 
     async def _on_opened(self, event: DomainEvent) -> None:
         if not isinstance(event, PositionOpened):
+            return
+        if self._already_applied(event):
             return
         notional = float(event.notional.amount)
         tags = event.tags
@@ -131,35 +147,151 @@ class PortfolioManager:
         await self._recompute()
 
     async def _on_closed(self, event: DomainEvent) -> None:
+        """Fold a close into the book — but only one the book can attribute.
+
+        The previous version applied ``realized_pnl`` to the running total
+        *before* checking whether the position was known, and credited cash in
+        both branches. An unattributable close therefore moved money, recorded no
+        ``ClosedTrade`` to explain it, and left the position open forever with its
+        principal never returned. In production that ran 2,420 times and put cash
+        at -37,713 USD against a 1,000 USD paper balance.
+
+        Attribution is now a precondition rather than a detail: by position id,
+        then by token, and if neither names a position the event is refused. A
+        book that declines to record what it cannot explain is the only kind
+        whose totals mean anything.
+        """
         if not isinstance(event, PositionClosed):
             return
-        key = str(event.aggregate_id)
-        pos = self._positions.pop(key, None)
+        if self._already_applied(event):
+            return
+        key, pos = self._attribute(event)
+        if key is None or pos is None:
+            _logger.error(
+                "position_close_unattributed",
+                position_id=str(event.aggregate_id),
+                mint=str(event.token.mint) if event.token else None,
+                reason=event.reason,
+                open_positions=len(self._positions),
+                note="close names no position in the book; refused, nothing applied",
+            )
+            return
+        self._positions.pop(key, None)
         self._entries.pop(key, None)
-        pnl = float(event.realized_pnl.amount)
+        pnl = self._realized_pnl(event, pos)
         self._realized += pnl
         # Return the freed principal plus the realised PnL to cash.
-        if pos is not None:
-            self._cash += pos.notional_usd + pnl
-            # ``PositionClosed`` does not carry the token; take it from the open
-            # view we tracked at open time (the authoritative attribution).
-            self._closed.append(
-                ClosedTrade(
-                    token=pos.token,
-                    pnl_usd=pnl,
-                    strategy=pos.strategy,
-                    reason=event.reason,
-                    at=event.occurred_at,
-                )
+        self._cash += pos.notional_usd + pnl
+        self._closed.append(
+            ClosedTrade(
+                token=pos.token,
+                pnl_usd=pnl,
+                strategy=pos.strategy,
+                reason=event.reason,
+                at=event.occurred_at,
             )
-        else:
-            self._cash += pnl
+        )
         if self._history is not None:
             try:
                 await self._history.record_pnl(pnl, kind="realized", mode=self._mode)
             except Exception as exc:  # history best-effort
                 _logger.debug("pnl_history_failed", error=str(exc))
         await self._recompute()
+
+    # -- attribution & idempotency -------------------------------------------
+
+    def _already_applied(self, event: DomainEvent) -> bool:
+        """Has this exact event already been folded into the book?
+
+        ``event_id`` survives the envelope, so a redelivered message rebuilds
+        with the same one. Only the accumulating handlers consult this: marking
+        is what makes ``+=`` safe on a bus that has always promised at-least-once
+        and, since the orphan reclaim landed, actually exercises it. Mark-to-
+        market is deliberately *not* guarded — it assigns rather than accumulates,
+        so it is idempotent by construction, and it is also the highest-volume
+        event on the stream; admitting it here would evict the open/close ids
+        that need the protection.
+        """
+        key = str(event.event_id)
+        if key in self._applied:
+            _logger.warning(
+                "portfolio_event_redelivered",
+                event_type=type(event).__name__,
+                event_id=key,
+                note="already applied to the book; ignored",
+            )
+            return True
+        self._applied[key] = None
+        while len(self._applied) > _APPLIED_EVENTS_MAX:
+            self._applied.popitem(last=False)
+        return False
+
+    def _attribute(self, event: PositionClosed) -> tuple[str | None, OpenPositionView | None]:
+        """Name the position a close belongs to: by id, then by token."""
+        key = str(event.aggregate_id)
+        pos = self._positions.get(key)
+        if pos is not None:
+            return key, pos
+        if event.token is None:
+            return None, None
+        # The engine documents one open position per mint, which makes the token
+        # a sufficient key whenever the id was lost with the process that minted
+        # it. Production does not always honour that: the live book holds mints
+        # carrying two open positions at once, so the match can be ambiguous.
+        #
+        # Resolve it oldest-first — dict order is insertion order — because a
+        # close is far more likely to belong to the position that has been open
+        # longest, and because an arbitrary choice would make the book depend on
+        # hash ordering. Ambiguity is reported rather than absorbed: it means the
+        # engine's own single-position-per-mint assumption is being violated
+        # upstream, which is a defect in its own right and not this method's to
+        # paper over.
+        mint = str(event.token.mint)
+        matches = [
+            (candidate_key, candidate)
+            for candidate_key, candidate in self._positions.items()
+            if str(candidate.token.mint) == mint
+        ]
+        if not matches:
+            return None, None
+        if len(matches) > 1:
+            _logger.warning(
+                "position_close_attribution_ambiguous",
+                mint=mint,
+                candidates=len(matches),
+                chosen=matches[0][0],
+                note="several open positions share this mint; took the oldest",
+            )
+        chosen_key, chosen = matches[0]
+        _logger.info(
+            "position_close_attributed_by_token",
+            mint=mint,
+            position_id=chosen_key,
+            event_position_id=key,
+            note="close carried an id the book does not hold; matched on mint",
+        )
+        return chosen_key, chosen
+
+    @staticmethod
+    def _realized_pnl(event: PositionClosed, pos: OpenPositionView) -> float:
+        """The realised PnL to record, recomputed when the engine lost the entry.
+
+        ``exit_notional`` is set only when the Execution Engine could not name the
+        entry it was closing against. Its own ``realized_pnl`` is then worthless —
+        it substituted the exit notional for the unknown entry, so the figure
+        collapses to minus the exit fee regardless of how the trade actually went.
+        The book holds the real entry notional, so it finishes the sum itself.
+
+        The result is net of the exit fee only: the entry fee was paid by a
+        process that no longer exists and the book never carried it. That is a
+        stated approximation on a recovery path, not a silent one — and it is
+        bounded by one fee, where the figure it replaces was unbounded fiction.
+        """
+        if event.exit_notional is None:
+            return float(event.realized_pnl.amount)
+        exit_notional = float(event.exit_notional.amount)
+        exit_fees = -float(event.realized_pnl.amount)
+        return exit_notional - pos.notional_usd - exit_fees
 
     # -- state ---------------------------------------------------------------
 
@@ -285,6 +417,7 @@ class PortfolioManager:
             closed=tuple(self._closed[-_CLOSED_TRADES_MAX:]),
             opens=tuple(self._opens),
             equity_curve=tuple(self._equity_curve),
+            applied_events=tuple(self._applied),
             saved_at=datetime.now(UTC),
         )
 
@@ -321,6 +454,9 @@ class PortfolioManager:
         }
         self._closed = list(state.closed)
         self._opens = deque(state.opens, maxlen=1000)
+        self._applied = OrderedDict(
+            (event_id, None) for event_id in state.applied_events[-_APPLIED_EVENTS_MAX:]
+        )
         if state.equity_curve:
             self._equity_curve = deque(state.equity_curve, maxlen=_EQUITY_CURVE_MAX)
 
