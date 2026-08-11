@@ -16,6 +16,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import desc, func, select
 
 from hades.api.dependencies import get_container
+from hades.api.security import Principal, get_principal
 from hades.bootstrap import Container
 from hades.contexts.risk.domain.events import (
     ACTION_ENTER_EMERGENCY,
@@ -28,6 +29,7 @@ from hades.contexts.risk.domain.events import (
 from hades.ops.risk_runtime import RISK_STATUS_NAMESPACE, STATUS_KEY
 from hades.shared_kernel.cache import CacheService
 from hades.shared_kernel.domain.identifiers import new_id
+from hades.shared_kernel.errors import PermissionDeniedError
 from hades.shared_kernel.logging import describe, get_logger
 from hades.shared_kernel.persistence.models.risk import RiskDecisionRecord
 
@@ -142,23 +144,55 @@ async def decision_detail(
 
 
 # -- human-gated control actions ------------------------------------------------
+#
+# "human-gated" was a claim in a summary string, not a property of the code:
+# none of these five depended on ``get_principal``, so the whole defence layer --
+# kill switch, circuit breaker, emergency mode -- could be driven by anyone who
+# could reach the port. On this deployment that is the LAN: API_BIND is the host's
+# 192.168.100.43 and the api container publishes 8000 on it.
+#
+# Worse, turning API_AUTH_ENABLED on would not have closed it. A router that never
+# asks for a principal is unaffected by the switch that decides what a principal
+# must prove, so the flag would have bought the appearance of protection and none
+# of it. That is the failure mode this log keeps recording (`dedup_key` in 6s,
+# WATCHDOG_UNHEALTHY_AFTER_MISSED_BEATS before 6k): a name promising a behaviour
+# the code never had.
+#
+# The split below is deliberate. Actions that *raise* a protection stay available
+# to the implicit principal, because a halt is conservative and something that can
+# only stop trading is not worth gating behind a credential an operator may not
+# have to hand in an emergency. Actions that *lift* one require an authenticated
+# operator, on the same reasoning as the switch to LIVE: they re-expose capital,
+# and the implicit `system` principal must never be able to do that by itself.
 
 
 @router.post("/kill-switch/reset", summary="Reset the Kill Switch (human-gated)")
-async def reset_kill_switch(container: Container = Depends(get_container)) -> dict[str, Any]:
-    await _command(container, ACTION_RESET_KILL_SWITCH, "operator reset")
+async def reset_kill_switch(
+    container: Container = Depends(get_container),
+    principal: Principal = Depends(get_principal),
+) -> dict[str, Any]:
+    _require_operator(principal, "resetting the kill switch")
+    await _command(container, ACTION_RESET_KILL_SWITCH, f"operator reset by {principal.identity}")
     return {"ok": True, "action": ACTION_RESET_KILL_SWITCH}
 
 
 @router.post("/circuit-breaker/reset", summary="Close the Circuit Breaker (human-gated)")
-async def reset_circuit_breaker(container: Container = Depends(get_container)) -> dict[str, Any]:
-    await _command(container, ACTION_RESET_CIRCUIT_BREAKER, "operator reset")
+async def reset_circuit_breaker(
+    container: Container = Depends(get_container),
+    principal: Principal = Depends(get_principal),
+) -> dict[str, Any]:
+    _require_operator(principal, "closing the circuit breaker")
+    await _command(
+        container, ACTION_RESET_CIRCUIT_BREAKER, f"operator reset by {principal.identity}"
+    )
     return {"ok": True, "action": ACTION_RESET_CIRCUIT_BREAKER}
 
 
 @router.post("/circuit-breaker/trip", summary="Trip the Circuit Breaker (human-gated)")
 async def trip_circuit_breaker(
-    reason: str = Query("manual"), container: Container = Depends(get_container)
+    reason: str = Query("manual"),
+    container: Container = Depends(get_container),
+    principal: Principal = Depends(get_principal),
 ) -> dict[str, Any]:
     await _command(container, ACTION_TRIP_CIRCUIT_BREAKER, reason)
     return {"ok": True, "action": ACTION_TRIP_CIRCUIT_BREAKER}
@@ -166,16 +200,36 @@ async def trip_circuit_breaker(
 
 @router.post("/emergency/enter", summary="Enter Emergency Mode (human-gated)")
 async def enter_emergency(
-    reason: str = Query("manual"), container: Container = Depends(get_container)
+    reason: str = Query("manual"),
+    container: Container = Depends(get_container),
+    principal: Principal = Depends(get_principal),
 ) -> dict[str, Any]:
     await _command(container, ACTION_ENTER_EMERGENCY, reason)
     return {"ok": True, "action": ACTION_ENTER_EMERGENCY}
 
 
 @router.post("/emergency/exit", summary="Leave Emergency Mode (human-gated)")
-async def exit_emergency(container: Container = Depends(get_container)) -> dict[str, Any]:
-    await _command(container, ACTION_EXIT_EMERGENCY, "operator")
+async def exit_emergency(
+    container: Container = Depends(get_container),
+    principal: Principal = Depends(get_principal),
+) -> dict[str, Any]:
+    _require_operator(principal, "leaving emergency mode")
+    await _command(container, ACTION_EXIT_EMERGENCY, principal.identity)
     return {"ok": True, "action": ACTION_EXIT_EMERGENCY}
+
+
+def _require_operator(principal: Principal, action: str) -> None:
+    """Refuse an action that lifts a protection unless a real operator asked.
+
+    Independent of ``API_AUTH_ENABLED``, exactly as the switch to LIVE is: the
+    implicit `system` principal exists so read paths keep working with auth off,
+    and it must never be sufficient to re-expose capital.
+    """
+    if not principal.authenticated:
+        raise PermissionDeniedError(
+            f"{action} requires an authenticated operator "
+            "(set API_AUTH_ENABLED and present a valid X-API-Key)"
+        )
 
 
 # -- helpers --------------------------------------------------------------------
