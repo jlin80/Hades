@@ -26,6 +26,7 @@ from typing import TypeVar
 from hades.contexts.common.domain.value_objects import WalletAddress
 from hades.contexts.features.domain.events import FeaturesComputed
 from hades.contexts.security.domain.models import (
+    DeveloperReputation,
     LiquidityPool,
     SecurityInputs,
 )
@@ -85,20 +86,20 @@ class SecurityContextAssembler:
             self._safe(self._sim.probe(token, amount_usd=self._probe_usd), None, "honeypot"),
         )
 
-        holder_count = None
-        if self._fetch_count:
-            holder_count = await self._safe(
-                self._reader.get_holder_count(mint), None, "holder_count"
-            )
-
+        # Second wave. These four depend only on the first gather's results and
+        # not on each other, yet they used to run as four chained awaits — four
+        # sequential network round-trips per token, on a lane whose throughput is
+        # exactly ``1 / per-event latency`` because the consumer awaits each
+        # handler in turn. The analyzers themselves are pure synchronous
+        # functions over an in-memory bundle and cost microseconds; the seconds
+        # were always here, in the waiting.
         deployer = self._deployer(stored)
-        developer = None
-        if deployer is not None:
-            developer = await self._safe(self._dev.get(deployer), None, "developer")
-
-        cluster = await self._safe(self._clusters.detect(token, holders), None, "cluster")
-
-        pool = await self._build_pool(stored)
+        developer, cluster, pool, holder_count = await asyncio.gather(
+            self._developer_for(deployer),
+            self._safe(self._clusters.detect(token, holders), None, "cluster"),
+            self._build_pool(stored),
+            self._holder_count(mint),
+        )
 
         return SecurityInputs(
             token=token,
@@ -116,6 +117,23 @@ class SecurityContextAssembler:
             has_socials=bool(stored.has_socials) if stored else False,
             is_mutable=stored.is_mutable if stored else None,
         )
+
+    async def _developer_for(self, deployer: WalletAddress | None) -> DeveloperReputation | None:
+        """The deployer's accumulated reputation, or ``None`` when unknown.
+
+        A coroutine rather than an inline ``if`` so it can join the gather: an
+        unknown deployer must cost nothing, not a branch that serialises the
+        three lookups behind it.
+        """
+        if deployer is None:
+            return None
+        return await self._safe(self._dev.get(deployer), None, "developer")
+
+    async def _holder_count(self, mint: str) -> int | None:
+        """The exact holder count, when the RPC budget allows it (off by default)."""
+        if not self._fetch_count:
+            return None
+        return await self._safe(self._reader.get_holder_count(mint), None, "holder_count")
 
     async def _build_pool(self, stored: StoredTokenFacts | None) -> LiquidityPool | None:
         if stored is None or stored.pool_address is None:
