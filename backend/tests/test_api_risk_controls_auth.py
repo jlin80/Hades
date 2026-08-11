@@ -1,15 +1,19 @@
-"""The defence layer's control endpoints are gated, not merely labelled gated.
+"""The defence layer's control endpoints obey API_AUTH_ENABLED.
 
 All five carried "(human-gated)" in their OpenAPI summary and none of them
-depended on ``get_principal``. On the live deployment ``API_BIND`` is the host's
-LAN address and the api container publishes 8000 on it, so the kill switch,
-circuit breaker and emergency mode were reachable from any machine on the network
-with no credential at all.
+depended on ``get_principal``. That made the label false in a specific and
+dangerous way: on the live deployment ``API_BIND`` is the host's LAN address and
+the api container publishes 8000 on it, and turning ``API_AUTH_ENABLED`` on --
+with a key already provisioned -- would not have changed anything here. A router
+that never asks for a principal is unaffected by the switch that decides what a
+principal must prove, so the flag bought the appearance of protection and none of
+it.
 
-Turning ``API_AUTH_ENABLED`` on would not have closed it either: a router that
-never asks for a principal is unaffected by the switch that decides what a
-principal must prove. That is the property these tests pin -- a gate that only
-exists in a docstring is the kind this project's own log keeps finding.
+The fix is not a stricter posture, it is an honest one: the flag now works. With
+auth off (a single-operator LAN, which is this deployment) every endpoint behaves
+exactly as before, and the dashboard keeps working untouched. With auth on they
+require the key. The operator chooses; the code stops lying about which choice is
+in effect.
 """
 
 from __future__ import annotations
@@ -24,16 +28,12 @@ from hades.shared_kernel.config.settings import get_settings
 
 _KEY = "test-operator-key-not-a-real-secret"
 
-#: Lifting a protection re-exposes capital, so it needs a real operator.
-_LIFTING = [
+_CONTROLS = [
     "/api/v1/risk/kill-switch/reset",
     "/api/v1/risk/circuit-breaker/reset",
-    "/api/v1/risk/emergency/exit",
-]
-#: Raising one only ever stops trading, so the implicit principal may do it.
-_RAISING = [
     "/api/v1/risk/circuit-breaker/trip",
     "/api/v1/risk/emergency/enter",
+    "/api/v1/risk/emergency/exit",
 ]
 
 
@@ -60,42 +60,37 @@ def auth_on(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     get_settings.cache_clear()
 
 
-@pytest.mark.parametrize("path", _LIFTING)
-def test_lifting_a_protection_is_refused_without_an_operator(path: str) -> None:
-    """Auth off is not consent. The implicit `system` principal is not an operator."""
-    with _client() as client:
-        resp = client.post(path)
-        assert resp.status_code == 403, f"{path} answered {resp.status_code}"
+@pytest.mark.parametrize("path", _CONTROLS)
+def test_controls_stay_open_while_auth_is_off(path: str) -> None:
+    """The default posture is unchanged, which is the point.
 
-
-@pytest.mark.parametrize("path", _RAISING)
-def test_raising_a_protection_stays_available(path: str) -> None:
-    """A halt is conservative; gating it behind a credential is the wrong trade.
-
-    An operator watching the platform misbehave must be able to stop it without
-    first finding an API key.
-
-    Asserted as "not refused" rather than "200": a control action publishes a
-    ``RiskControlCommandIssued`` for the Worker to act on, and there is no Redis
-    in the unit environment. The property under test is the authorisation
-    decision, which happens before any of that, so pinning the transport here
-    would only make the test fail for a reason it is not about.
+    This deployment runs with auth off and a dashboard that sends no key. Closing
+    these by default would have broken the Risk screen to enforce a policy the
+    operator did not ask for.
     """
     with _client() as client:
         resp = client.post(path)
-        assert resp.status_code != 403, f"{path} was refused for the implicit principal"
+        assert resp.status_code != 403, f"{path} was refused with auth disabled"
 
 
-@pytest.mark.parametrize("path", _LIFTING)
-def test_lifting_is_refused_with_a_wrong_key(path: str, auth_on: None) -> None:
+@pytest.mark.parametrize("path", _CONTROLS)
+def test_controls_require_the_key_once_auth_is_on(path: str, auth_on: None) -> None:
+    """The regression that mattered: the flag used not to reach these at all."""
+    with _client() as client:
+        resp = client.post(path)
+        assert resp.status_code == 403, f"{path} answered {resp.status_code} with no key"
+
+
+@pytest.mark.parametrize("path", _CONTROLS)
+def test_a_wrong_key_is_refused(path: str, auth_on: None) -> None:
     with _client() as client:
         resp = client.post(path, headers={"X-API-Key": "not-the-key"})
         assert resp.status_code == 403
 
 
-@pytest.mark.parametrize("path", _LIFTING)
-def test_lifting_succeeds_for_an_authenticated_operator(path: str, auth_on: None) -> None:
-    """The gate opens for a real operator — see the note above on "not 403"."""
+@pytest.mark.parametrize("path", _CONTROLS)
+def test_the_right_key_opens_the_gate(path: str, auth_on: None) -> None:
+    """See the note in ``_client`` on asserting "not 403" rather than 200."""
     with _client() as client:
         resp = client.post(path, headers={"X-API-Key": _KEY})
         assert resp.status_code != 403, resp.text

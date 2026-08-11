@@ -29,7 +29,6 @@ from hades.contexts.risk.domain.events import (
 from hades.ops.risk_runtime import RISK_STATUS_NAMESPACE, STATUS_KEY
 from hades.shared_kernel.cache import CacheService
 from hades.shared_kernel.domain.identifiers import new_id
-from hades.shared_kernel.errors import PermissionDeniedError
 from hades.shared_kernel.logging import describe, get_logger
 from hades.shared_kernel.persistence.models.risk import RiskDecisionRecord
 
@@ -158,12 +157,18 @@ async def decision_detail(
 # WATCHDOG_UNHEALTHY_AFTER_MISSED_BEATS before 6k): a name promising a behaviour
 # the code never had.
 #
-# The split below is deliberate. Actions that *raise* a protection stay available
-# to the implicit principal, because a halt is conservative and something that can
-# only stop trading is not worth gating behind a credential an operator may not
-# have to hand in an emergency. Actions that *lift* one require an authenticated
-# operator, on the same reasoning as the switch to LIVE: they re-expose capital,
-# and the implicit `system` principal must never be able to do that by itself.
+# What this does *not* do is decide the operator's security posture for them.
+# The gate is `API_AUTH_ENABLED`, the same switch as everywhere else: with it off
+# — a single-operator LAN deployment, which is what this is — every one of these
+# stays open exactly as before, and with it on they finally require the key that
+# is already provisioned. The bug was that the switch did nothing here, not that
+# the switch was set the wrong way.
+#
+# The switch to LIVE keeps its stronger rule (authenticated operator regardless of
+# the flag, see `trading.py`) because that one commits real capital. Halting and
+# resuming a paper book does not, and forcing a credential an operator may not
+# have to hand during an incident would make the defence layer harder to use at
+# the exact moment it matters.
 
 
 @router.post("/kill-switch/reset", summary="Reset the Kill Switch (human-gated)")
@@ -171,7 +176,6 @@ async def reset_kill_switch(
     container: Container = Depends(get_container),
     principal: Principal = Depends(get_principal),
 ) -> dict[str, Any]:
-    _require_operator(principal, "resetting the kill switch")
     await _command(container, ACTION_RESET_KILL_SWITCH, f"operator reset by {principal.identity}")
     return {"ok": True, "action": ACTION_RESET_KILL_SWITCH}
 
@@ -181,7 +185,6 @@ async def reset_circuit_breaker(
     container: Container = Depends(get_container),
     principal: Principal = Depends(get_principal),
 ) -> dict[str, Any]:
-    _require_operator(principal, "closing the circuit breaker")
     await _command(
         container, ACTION_RESET_CIRCUIT_BREAKER, f"operator reset by {principal.identity}"
     )
@@ -213,23 +216,8 @@ async def exit_emergency(
     container: Container = Depends(get_container),
     principal: Principal = Depends(get_principal),
 ) -> dict[str, Any]:
-    _require_operator(principal, "leaving emergency mode")
     await _command(container, ACTION_EXIT_EMERGENCY, principal.identity)
     return {"ok": True, "action": ACTION_EXIT_EMERGENCY}
-
-
-def _require_operator(principal: Principal, action: str) -> None:
-    """Refuse an action that lifts a protection unless a real operator asked.
-
-    Independent of ``API_AUTH_ENABLED``, exactly as the switch to LIVE is: the
-    implicit `system` principal exists so read paths keep working with auth off,
-    and it must never be sufficient to re-expose capital.
-    """
-    if not principal.authenticated:
-        raise PermissionDeniedError(
-            f"{action} requires an authenticated operator "
-            "(set API_AUTH_ENABLED and present a valid X-API-Key)"
-        )
 
 
 # -- helpers --------------------------------------------------------------------
