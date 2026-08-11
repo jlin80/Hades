@@ -17,7 +17,7 @@
 | **Current phase** | **Phase 4 — Exploration Mode: the budgeted, self-terminating answer to the cold start (§6p)** |
 | **Version** | `0.10.0` |
 | **Trading** | Paper only. Live execution is hard-gated OFF (two switches), blocked by the Production Checklist (any failing required subsystem or an active Emergency Mode refuses the switch to LIVE), **and** — as of Stage 2 — the switch to LIVE additionally requires an authenticated operator (never the implicit `system` principal). The Execution Engine remains the *only* component that knows the mode; everything upstream is mode-agnostic. |
-| **Backend tests** | **742 passing** · `mypy --strict` clean (456 src files) · **`ruff` clean (0 findings)** · suite runs **warnings-as-errors** |
+| **Backend tests** | **882 passing** · `ruff` clean (0 findings) · suite runs **warnings-as-errors**. `mypy --strict` is clean in CI; the Windows working checkout reports 23 pre-existing errors in 6 files, and `test_healthcheck_cost` fails there because it shells out to a bare `python -c` that does not inherit pytest's `pythonpath` — both are baseline, not regressions (§6u) |
 | **Cold start** | **Resolvable and now addressed.** The learning loop is closed (§6m), the lab feeds it (§6n), the brain reads it (§6o), and a budgeted Exploration programme buys the first ground-truth samples and switches itself off when the memory has them (§6p). Exploration is **off by default** and waives only the AI Committee's conviction gates — never a safety rule, never the defence layer, never an allocation limit. |
 | **Deployment** | `docker compose up -d` is now a complete, no-manual-steps bring-up: a one-shot `migrate` service applies the schema to head before any app service starts. |
 
@@ -2453,6 +2453,159 @@ a dead source task must not read as up; a source recovers to up after a transien
 
 ---
 
+## 6u. The book that could not name what it was paid for (2026-08-11)
+
+The session began with an operator noticing "very strange maths with enormous numbers" on
+the dashboard. The book of record, read straight off `portfolio_state` on CT 203:
+
+```
+starting_balance     1,000.00
+cash_usd           -37,713.68     <- negative, which paper trading cannot produce
+realized_pnl_usd   -36,990.70
+peak_equity_usd    935,055.02
+open_positions             29
+closed_trades               0     <- and pnl_history holds 2,420 rows
+```
+
+**2,420 closes, none of them attributable.** Not a rare edge: the only path taken.
+
+### Two fabrications, one behind the other
+
+`ExecutionEngine._open` is a process-local dict, mint → position_id, never persisted. A restart
+empties it while the Portfolio Manager restores its positions from the snapshot, so from that
+moment the engine could not name the position it was closing. It minted a fresh id
+(`str(new_id())`) and substituted the exit notional for the unknown entry. Both look like data.
+Neither is. The invented id in particular is worse than no id at all, because it made the event
+look well-formed to everything downstream.
+
+`PortfolioManager._on_closed` then added `realized_pnl` to the running total *before* checking
+whether it recognised the position, and credited cash in both branches. An unattributable close
+therefore moved money, recorded no `ClosedTrade` to explain it, and left the position open with
+its principal never returned. Repeat 2,420 times and the arithmetic above is the only possible
+outcome: cash falls forever, `open_positions` only grows, and the ledger has nothing to show for
+37,000 USD of movement.
+
+Attribution is now a precondition rather than a detail — by position id, then by token (the
+event carries one now), and if neither names a position the event is refused and logged. The
+engine stops fabricating and hands over the two facts that are real: which token, and what the
+exit was worth. The book holds the entry and finishes the sum.
+
+The handlers are also idempotent now. The bus has always promised at-least-once and, since the
+orphan reclaim of §6q, actually exercises it — yet all three money-mutating handlers used `+=`.
+The guard keys on `event_id` and is **persisted in the snapshot**, because the redelivery it
+protects against is *caused* by the restart: a container killed mid-dispatch leaves messages
+unacked and `XAUTOCLAIM` returns them minutes after it comes back. A guard that reset on startup
+would be empty at precisely the moment it is needed.
+
+### The same defect had also emptied the learning loop
+
+`knowledge_lessons` held **0** rows against 29 recorded decisions. Knowledge joins a settled
+outcome to the decision that produced it, and every close carried an id no decision had ever
+used — so nothing ever joined. The platform had not been failing to learn slowly; it had never
+recorded a single lesson.
+
+That is the answer to a question three sessions old. Exploration granting nothing was never a
+calibration problem: with zero lessons the evidence is *insufficient*, which is precisely the
+state in which the programme is supposed to run.
+
+### Wrapped SOL was a discovered token
+
+`pick_base_mint` answers "which side of this pair is the token of interest?" and fell through to
+`return mint_a or mint_b`. For a SOL/USDC or USDC/USDT pool neither side is one, and the honest
+answer is *neither* — but the fallback returned a pricing asset. So the platform ingested its own
+quote currency, screened it, scored it, sized it and bought it. The book carried a position on
+`So111...112` opened at 75.408 USD, which is SOL's price.
+
+Not localised, and therefore not fixed: that same position was labelled `FOGO`, so metadata
+attribution is wrong somewhere beyond this function.
+
+### Four round-trips that were never ordered
+
+The brief's hypothesis was that Security's ten analyzers, running sequentially per token, were
+the cost. They are not, and the structure says so before any profiler does:
+`SecurityEngine._analyze_all` calls pure synchronous functions over an already-assembled
+in-memory bundle — microseconds. The seconds were in the waiting.
+
+`SecurityContextAssembler.build` opened with a concurrent gather of four reads and then had
+**four chained awaits** — developer reputation, wallet clustering, the LP burn/lock read, the
+optional holder count — none of which depends on another. They were ordered by nothing but the
+order they were written in. Collapsed into one gather: 0.304 s → 0.13 s per token with one-step
+fakes.
+
+This matters more than an ordinary latency saving because of how a lane consumes. `_dispatch`
+awaits each handler in turn and `_consume_once` awaits each message in turn, so **a lane's event
+rate is exactly `1 / per-event latency`**. Every serialised round-trip is a direct divisor of
+platform throughput.
+
+Risk, profiled the same way, is not the sibling bottleneck the brief assumed. Its facts cache is
+an in-memory `OrderedDict`; the exploration check short-circuits when disabled and is TTL-cached
+when not; `risk_state()` is pure. Its whole per-event I/O is one audit INSERT and one publish.
+The lane experiment's "risk ≈ 0.4 ev/s" measured twelve lanes contending for one event loop in
+one process, which cannot distinguish handler cost from contention.
+
+### What the funnel actually shows
+
+```
+discovered           668
+features             418
+security_assessed     63     <- 85% lost here
+security_approved     12
+committee_predicted    1
+risk_evaluated         0
+```
+
+`GET /api/v1/exploration/status` closes the argument: `granted_total: 0` **and
+`declined_total: 0`, with `declines_by_reason: {}`**. `consider()` has never been called. The
+programme is enabled, active, with its full 250-trade budget and no blocking reason — it is
+simply never asked. Exploration needs no fix of its own; it needs candidates, and candidates need
+Security to keep up.
+
+### The defence layer said human-gated and asked no one
+
+All five control endpoints — kill switch, circuit breaker, emergency mode — carried
+"(human-gated)" in their OpenAPI summary and **none depended on `get_principal`**. On this
+deployment `API_BIND` is `192.168.100.43` and the api container publishes 8000 on it, so they
+answered to every device on the network.
+
+The sharp part: turning `API_AUTH_ENABLED` on would not have closed it. A router that never asks
+for a principal is unaffected by the switch that decides what a principal must prove — and a
+65-character key was already provisioned in the CT's `.env`, one edit from a false sense of
+having secured it. Same shape as `dedup_key` in §6s and `WATCHDOG_UNHEALTHY_AFTER_MISSED_BEATS`
+before §6k: a name promising a behaviour the code never had.
+
+The gate is now `API_AUTH_ENABLED` and nothing more. With auth off — a single-operator LAN, which
+is what this is — every endpoint behaves exactly as before and the dashboard is untouched. The
+switch to LIVE keeps its stronger rule, because that one commits real capital; halting and
+resuming a paper book does not, and forcing a credential an operator may not have to hand during
+an incident would make the defence layer hardest to use exactly when it matters.
+
+### Deployed, and what the deployment does not show
+
+Production was found on `0e2176d`, four commits behind the branch: the reflog records the lane
+work being deployed and rolled back **twice** on 2026-08-06, ending in a deliberate return to
+pre-lane code. The fixes were therefore cherry-picked onto `0e2176d` as
+`deploy/book-fix-on-0e2176d` rather than deploying a HEAD that would have reintroduced them.
+
+The book was reset (the corrupt state exported first), the derived and PnL-contaminated tables
+truncated, and the consumer group moved to the stream head — the worker was a full 50,000-entry
+window, 5.4 hours, behind, and every one of those events referred to a book that no longer
+existed.
+
+**The assembler fix did not turn the lag around, and should not be recorded as though it had.**
+Measured over 610 s after deploying it: security assessments improved from ~1 per 90–120 s to
+**1 per 61 s**, which is the path the fix targets. But bus consumption measured 0.246 ev/s
+against a 0.42 ev/s pre-deploy baseline — *lower*, unexplained, and not explained away here; the
+two windows were 610 s and 120 s and taken in different system states, so neither is a controlled
+result. Lag grew at +2.3 ev/s throughout.
+
+The ceiling is structural and untouched: one event at a time, per lane, by construction. Lowering
+per-event latency raises the ceiling; it does not lift it above what the Scanner produces. The
+open question is concurrency *within* a lane, which nothing has tried. Handlers are already
+required to be idempotent, so it is not obviously unsafe — but the lanes were rolled back twice,
+and a third attempt without a written design would be the pattern rather than bad luck.
+
+---
+
 ## 7. Testing
 
 `backend/tests` (379 tests, all green; `mypy --strict` clean; `ruff` clean; suite runs
@@ -2766,6 +2919,32 @@ Earlier pending items remain relevant:
 ---
 
 ## Changelog of this document
+
+- **2026-08-11** — **The book that could not name what it was paid for** (§6u). Investigated
+  after the dashboard showed absurd figures; the book of record held cash at **-37,713 USD**
+  against a 1,000 USD paper balance, 935,055 peak equity, 29 open positions and **zero closed
+  trades against 2,420 real closes**. `ExecutionEngine` minted a fresh `position_id` whenever a
+  restart had emptied its process-local mint → id map, and `PortfolioManager._on_closed` applied
+  `realized_pnl` before checking whether it recognised the position — so every close moved money,
+  explained nothing, and never returned the principal. Attribution is now a precondition (by id,
+  then by token, else refused and logged) and the three money-mutating handlers are idempotent
+  with the guard persisted in the snapshot, because the redelivery it prevents is *caused* by the
+  restart. The same defect had emptied the learning loop: `knowledge_lessons` held **0** rows
+  against 29 decisions, which is why Exploration had never granted anything —
+  `declined_total: 0` and `declines_by_reason: {}` prove `consider()` was never called, so the
+  programme needs candidates, not calibration. Also: `pick_base_mint` returned a quote asset for
+  a pool of two pricing assets, so **Wrapped SOL was ingested, screened, judged and bought** at
+  its own 75.408 USD price; `SecurityContextAssembler` ran four mutually independent lookups as
+  chained awaits (0.304 s → 0.13 s once gathered — the ten analyzers were never the cost, they
+  are pure and synchronous); and all five defence-layer control endpoints said "(human-gated)"
+  while depending on no principal at all, on an API bound to the LAN with a key already
+  provisioned — turning `API_AUTH_ENABLED` on would not have closed it. Deployed as
+  `deploy/book-fix-on-0e2176d`, cherry-picked onto the commit production was actually running
+  rather than a HEAD that would have reintroduced the twice-rolled-back lanes; book reset,
+  derived tables truncated, consumer group moved past a 5.4-hour backlog. **The throughput
+  ceiling is not closed**: Security improved from ~1 assessment per 90–120 s to 1 per 61 s, but
+  lag still grows at +2.3 ev/s and a lane processes one event at a time by construction.
+  Gate: **882 tests** (+21), `ruff` clean, `mypy --strict` unchanged from baseline.
 
 - **2026-07-29** — **Phase 4 — Exploration Mode** (§6p). The cold start finally has a
   deliberate answer instead of a pending decision. A new `exploration` bounded context may let
