@@ -42,12 +42,36 @@ class TrailingStopAdjusted(DomainEvent):
 
 
 class PositionClosed(DomainEvent):
-    """A position was fully closed."""
+    """A position was fully closed.
+
+    ``token`` is the *reconciliation* key, and it exists because the
+    ``aggregate_id`` alone proved not to be one. The Execution Engine tracked
+    open positions in a process-local dict, so a restart lost the mint →
+    position_id mapping and every later close carried a freshly minted id that
+    no ``PositionOpened`` had ever used. The Portfolio Manager looked that id up,
+    missed, and took the unattributed branch — 2,420 closes in production, not
+    one of them matched, and the book drifted to a negative cash balance while
+    every container reported healthy.
+
+    An id that is regenerated when it is not known is not an identity. The mint
+    is one: the engine models a single position per mint, so a close can always
+    be attributed by token even when the id is lost. It is optional so envelopes
+    published before this field existed still rebuild; such an event cannot be
+    attributed and is refused rather than applied to the book.
+    """
 
     aggregate_type: str = "position"
     exit_price: Money
     realized_pnl: Money
     reason: str  # "take_profit" | "stop_loss" | "trailing" | "manual" | ...
+    token: TokenRef | None = None
+    #: Gross proceeds of the closing fill. Carried so the book of record can
+    #: recompute realised PnL for itself when the engine closed a position whose
+    #: entry it had lost: the old code substituted the exit notional for the
+    #: unknown entry, which makes ``realized_pnl`` collapse to minus the exit fee
+    #: — a plausible-looking number that is pure fiction. ``None`` means the
+    #: engine could attribute the entry and its own figure stands.
+    exit_notional: Money | None = None
 
 
 class CapitalCommitted(DomainEvent):

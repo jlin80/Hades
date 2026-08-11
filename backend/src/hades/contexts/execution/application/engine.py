@@ -204,11 +204,46 @@ class ExecutionEngine:
         # ever added, entry accounting must track remaining quantity/cost basis.
         mint = str(request.token.mint)
         open_pos = self._open.pop(mint, None)
-        position_id = open_pos.position_id if open_pos else str(new_id())
         exit_notional = float((fill.notional or request.notional).amount)
-        entry_notional = open_pos.entry_notional_usd if open_pos else exit_notional
-        entry_fees = open_pos.entry_fees_usd if open_pos else 0.0
         exit_fees = float(fill.fees.amount)
+
+        if open_pos is None:
+            # ``self._open`` is process state: a restart empties it while the
+            # Portfolio Manager restores its positions from the snapshot, so from
+            # then on the engine cannot name the position it is closing. The old
+            # code minted a fresh id here and treated the exit notional as the
+            # entry. Both are fabrications, and together they were the whole
+            # defect: the book looked the id up, missed, and applied a fictitious
+            # PnL to a position it never removed. Measured in production, 2,420
+            # closes took this path and *none* of them were attributable.
+            #
+            # So say so, and hand the book the two facts that are real — which
+            # token, and what the exit was actually worth. The Portfolio Manager
+            # holds the entry and is the book of record; it can finish the sum.
+            _logger.error(
+                "position_close_unattributed",
+                mint=mint,
+                symbol=_symbol(request.token),
+                exit_usd=round(exit_notional, 4),
+                exit_fees_usd=round(exit_fees, 4),
+                reason=request.tags.get(TAG_EXIT_REASON, "manual"),
+                note="entry unknown to this process; the book reconciles by token",
+            )
+            await self._bus.publish(
+                PositionClosed(
+                    aggregate_id=str(new_id()),
+                    token=request.token,
+                    exit_price=fill.average_price,
+                    realized_pnl=Money(amount=Decimal(str(-exit_fees))),
+                    exit_notional=Money(amount=Decimal(str(exit_notional))),
+                    reason=request.tags.get(TAG_EXIT_REASON, "manual"),
+                )
+            )
+            return
+
+        position_id = open_pos.position_id
+        entry_notional = open_pos.entry_notional_usd
+        entry_fees = open_pos.entry_fees_usd
         # Realized PnL is net of BOTH round-trip frictions (buy fee + sell fee).
         realized = exit_notional - entry_notional - entry_fees - exit_fees
         # The closing line carries the number the operator actually cares about:
@@ -228,6 +263,7 @@ class ExecutionEngine:
         await self._bus.publish(
             PositionClosed(
                 aggregate_id=position_id,
+                token=request.token,
                 exit_price=fill.average_price,
                 realized_pnl=Money(amount=Decimal(str(realized))),
                 reason=request.tags.get(TAG_EXIT_REASON, "manual"),
