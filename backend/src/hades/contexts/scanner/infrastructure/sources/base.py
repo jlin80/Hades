@@ -44,12 +44,24 @@ QUOTE_MINTS = frozenset(
 
 
 def pick_base_mint(mint_a: str | None, mint_b: str | None) -> str | None:
-    """Return the non-quote mint of a pair (the token of interest)."""
+    """Return the non-quote mint of a pair, or ``None`` if the pair has none.
+
+    A pool of two pricing assets — SOL/USDC, USDC/USDT — contains no token of
+    interest, and the old fallback (``return mint_a or mint_b``) answered it with
+    a quote mint anyway. That is how Wrapped SOL entered the platform as a
+    discovered candidate: it was screened, scored, judged by the committee and
+    ultimately bought, and the live book still holds a position on
+    ``So111...112`` opened at an entry price of 75.408 — SOL's own price, not a
+    meme coin's.
+
+    The honest answer to "which of these two is the token?" is sometimes
+    *neither*, and the caller already handles ``None`` by skipping the pool.
+    """
     if mint_a and mint_a not in QUOTE_MINTS:
         return mint_a
     if mint_b and mint_b not in QUOTE_MINTS:
         return mint_b
-    return mint_a or mint_b
+    return None
 
 
 def make_candidate(

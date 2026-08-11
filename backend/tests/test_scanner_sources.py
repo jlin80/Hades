@@ -93,6 +93,23 @@ def test_pick_base_mint_prefers_non_quote() -> None:
     assert pick_base_mint(_MINT, _SOL) == _MINT
 
 
+def test_a_pair_of_quote_assets_yields_no_candidate() -> None:
+    """SOL/USDC is not a token discovery, and the old fallback said it was.
+
+    ``return mint_a or mint_b`` answered "which of these is the token?" with a
+    pricing asset whenever neither side was one. Wrapped SOL was ingested that
+    way, screened, judged and bought: the live book still carries a position on
+    it opened at 75.408 USD — SOL's own price.
+    """
+    usdc = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+    usdt = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"
+    assert pick_base_mint(_SOL, usdc) is None
+    assert pick_base_mint(usdc, usdt) is None
+    # A quote mint with nothing opposite it is still not a token of interest.
+    assert pick_base_mint(_SOL, None) is None
+    assert pick_base_mint(None, None) is None
+
+
 def test_factory_builds_known_sources_and_skips_unknown() -> None:
     sources = build_sources(["pumpfun", "raydium", "nope"])
     assert {s.name for s in sources} == {"pumpfun", "raydium"}
