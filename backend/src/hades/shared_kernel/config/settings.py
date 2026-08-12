@@ -331,6 +331,14 @@ class SecuritySettings(_Section):
     cluster_live_lookups: bool = True  # bounded funding-graph RPC lookups
     cluster_max_holders: int = 12
     cluster_min_members: int = 3
+    #: How many funder lookups may be in flight at once. These twelve RPC calls
+    #: ran strictly one after another and were, measured live, essentially the
+    #: platform's entire per-token cost: 21.4 s in the assembler against 10 ms for
+    #: all ten analyzers. Bounded rather than unbounded because the RPC manager
+    #: rate-limits per provider and this deployment has one, so a burst of twelve
+    #: would be throttled into reduced coverage — buying latency by lowering the
+    #: quality of the answer, which is the trade this engine exists to refuse.
+    cluster_lookup_concurrency: int = 4
 
 
 class RiskSettings(_Section):

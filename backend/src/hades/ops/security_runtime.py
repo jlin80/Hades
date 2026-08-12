@@ -145,6 +145,7 @@ class SecurityRuntime:
                 RpcOnChainReader(self._rpc),
                 max_holders=sec.cluster_max_holders,
                 min_members=sec.cluster_min_members,
+                concurrency=sec.cluster_lookup_concurrency,
             )
         return NullClusterDetector()
 
