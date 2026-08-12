@@ -50,6 +50,24 @@ class SecurityMetrics:
             "Wall-clock time to fully analyse one token",
             buckets=(0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0),
         )
+        # The split that mattered and did not exist. `analysis_seconds` covers the
+        # engine only, so the assembler's I/O -- which turned out to be the whole
+        # cost -- was invisible: a session spent arguing from code structure about
+        # which half was slow, and could not show afterwards whether making it
+        # concurrent had helped. Two histograms answer that directly, and they are
+        # deliberately permanent rather than a temporary probe, because the
+        # question recurs every time the pipeline falls behind.
+        self.assemble_seconds = metrics.histogram(
+            "hades_security_assemble_seconds",
+            "Time spent gathering a token's analysis context (I/O: RPC, stored facts, "
+            "honeypot probe, developer reputation, clustering)",
+            buckets=(0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0),
+        )
+        self.analyzers_seconds = metrics.histogram(
+            "hades_security_analyzers_seconds",
+            "Time spent running the ten analyzers (pure computation, no I/O)",
+            buckets=(0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0),
+        )
         self.security_score = metrics.gauge(
             "hades_security_score_last",
             "Most recent final security score",

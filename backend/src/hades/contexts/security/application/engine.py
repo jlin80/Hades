@@ -173,6 +173,20 @@ class SecurityEngine:
         return assessment
 
     def _analyze_all(self, inputs: SecurityInputs) -> list[AnalyzerReport]:
+        started = asyncio.get_running_loop().time()
+        try:
+            return self._analyze_each(inputs)
+        finally:
+            # Metered separately from the assembler so "is it the analyzers or the
+            # I/O?" is a question the dashboard answers rather than one that needs
+            # a reading of the code. The answer has been the I/O by three orders of
+            # magnitude, and a number on record is what keeps that from being
+            # re-litigated from intuition next time the pipeline falls behind.
+            self._metrics.analyzers_seconds.observe(
+                asyncio.get_running_loop().time() - started
+            )
+
+    def _analyze_each(self, inputs: SecurityInputs) -> list[AnalyzerReport]:
         reports: list[AnalyzerReport] = []
         for analyzer in self._analyzers:
             try:

@@ -205,7 +205,9 @@ class SecurityRuntime:
         )
 
     def _register(self) -> None:
-        SecurityAnalysisHandler(self._engine, self._assembler).register(self._c.event_bus)
+        SecurityAnalysisHandler(self._engine, self._assembler, self._metrics).register(
+            self._c.event_bus
+        )
         self._c.event_bus.subscribe(TokenApproved.__name__, self._on_approved)
         self._c.event_bus.subscribe(TokenRejected.__name__, self._on_rejected)
 

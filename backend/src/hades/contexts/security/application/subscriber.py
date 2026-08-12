@@ -10,10 +10,12 @@ documented flow, kept decoupled.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Protocol, runtime_checkable
 
 from hades.contexts.features.domain.events import FeaturesComputed
 from hades.contexts.security.application.engine import SecurityEngine
+from hades.contexts.security.application.metrics import SecurityMetrics
 from hades.contexts.security.domain.models import SecurityInputs
 from hades.shared_kernel.domain.events import DomainEvent
 from hades.shared_kernel.events import EventBus
@@ -37,9 +39,17 @@ class SecurityInputsAssembler(Protocol):
 class SecurityAnalysisHandler:
     """Analyses a token's security whenever its features are computed."""
 
-    def __init__(self, engine: SecurityEngine, assembler: SecurityInputsAssembler) -> None:
+    def __init__(
+        self,
+        engine: SecurityEngine,
+        assembler: SecurityInputsAssembler,
+        metrics: SecurityMetrics | None = None,
+    ) -> None:
         self._engine = engine
         self._assembler = assembler
+        # Optional so every existing construction site keeps working; the runtime
+        # passes the same registry the engine already uses.
+        self._metrics = metrics
 
     def register(self, event_bus: EventBus) -> None:
         event_bus.subscribe(FeaturesComputed.__name__, self.handle)
@@ -48,7 +58,12 @@ class SecurityAnalysisHandler:
         if not isinstance(event, FeaturesComputed):
             return
         try:
+            started = asyncio.get_running_loop().time()
             inputs = await self._assembler.build(event)
+            if self._metrics is not None:
+                self._metrics.assemble_seconds.observe(
+                    asyncio.get_running_loop().time() - started
+                )
             await self._engine.analyze(inputs)
         except Exception as exc:  # never let one token break the subscriber
             _logger.warning(
