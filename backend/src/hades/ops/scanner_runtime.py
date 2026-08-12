@@ -95,7 +95,7 @@ class ScannerRuntime:
 
     def _build_rpc(self) -> RpcManager:
         s = self._c.settings
-        endpoints = build_endpoints(s.rpc, s.solana.rpc_http_url)
+        endpoints = build_endpoints(s.rpc, s.solana.rpc_http_url, s.solana.rpc_fallback_urls)
         bus = self._c.event_bus
 
         async def on_switch(switch: RpcSwitch) -> None:

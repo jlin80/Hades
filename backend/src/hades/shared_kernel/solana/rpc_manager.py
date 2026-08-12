@@ -390,14 +390,42 @@ class RpcManager:
             )
 
 
-def build_endpoints(settings: RpcSettings, fallback_http_url: str) -> list[RpcEndpointConfig]:
+def build_endpoints(
+    settings: RpcSettings, fallback_http_url: str, backup_urls: str = ""
+) -> list[RpcEndpointConfig]:
     """Resolve the provider list, always guaranteeing at least one endpoint.
 
     Uses the explicitly configured ``RPC_ENDPOINTS`` when present; otherwise
-    synthesises a single default provider from ``SOLANA_RPC_HTTP_URL`` so the
-    platform can always start.
+    synthesises the primary from ``SOLANA_RPC_HTTP_URL`` **plus** any comma-
+    separated backups from ``SOLANA_RPC_FALLBACK_URLS``.
+
+    Those backups are new here, and the reason is worth recording. The setting
+    has existed since Phase 2, is documented in ``.env.example`` as
+    "comma-separated backups", and was read by nothing: this function took the
+    primary URL and stopped. So the platform had a failover mechanism, a
+    health-scored ranking and a documented way to configure spare providers, and
+    could still be taken off the air entirely by one provider — which is exactly
+    what happened. On 2026-08-11 the configured Helius endpoint began answering
+    ``HTTP 500`` to ``getAccountInfo`` and ``getTokenLargestAccounts`` while
+    ``getHealth`` kept succeeding; the public RPC served the same call in 0.45 s.
+    Every account read timed out at 12 s, Security analysed every token blind,
+    and nothing reached the committee.
+
+    ``max_attempts`` was equally inert for the same reason: :meth:`RpcManager.call`
+    iterates ranked *candidates*, so a single configured provider means a single
+    attempt no matter what the retry budget says.
+
+    Backups are given a lower priority than the primary, so the ranking still
+    prefers the paid provider whenever it is healthy and only reaches for a spare
+    when the health score has already moved.
     """
     enabled = [e for e in settings.endpoints if e.enabled]
     if enabled:
         return enabled
-    return [RpcEndpointConfig(name="default", http_url=fallback_http_url, priority=100)]
+    endpoints = [RpcEndpointConfig(name="default", http_url=fallback_http_url, priority=100)]
+    for index, url in enumerate(u.strip() for u in backup_urls.split(",")):
+        if url:
+            endpoints.append(
+                RpcEndpointConfig(name=f"backup{index + 1}", http_url=url, priority=50)
+            )
+    return endpoints

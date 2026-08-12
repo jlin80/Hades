@@ -94,7 +94,7 @@ class IntelligenceRuntime:
 
     def _build_rpc(self) -> RpcManager:
         s = self._c.settings
-        endpoints = build_endpoints(s.rpc, s.solana.rpc_http_url)
+        endpoints = build_endpoints(s.rpc, s.solana.rpc_http_url, s.solana.rpc_fallback_urls)
         return RpcManager(endpoints, settings=s.rpc, metrics=self._c.metrics)
 
     def _repository(self) -> WalletRepository:
