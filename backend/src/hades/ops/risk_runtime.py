@@ -166,7 +166,32 @@ class RiskRuntime:
             _logger.warning("risk_control_command_failed", action=event.action, error=str(exc))
 
     async def _on_position_closed(self, event: DomainEvent) -> None:
+        """Feed the loss streak — but only from closes that are real trade results.
+
+        The kill switch counts consecutive losses, and it reached level 2 on
+        **2,530** of them within hours of the book being reset to a clean 1,000
+        USD. None were trades. When the Execution Engine cannot attribute the
+        entry it is closing against, it reports the exit fee as the realised PnL —
+        a small negative number, and therefore a "loss" to a test that only asks
+        whether the figure is below zero.
+
+        ``exit_notional`` is set on exactly those events and on no others, so it
+        is the honest discriminator: the Portfolio Manager already refuses to
+        apply them to the book, and the guardian must not treat as evidence of
+        losing what the book itself declined to record. A halt founded on
+        fabricated losses is not a conservative halt, it is a wrong one — it
+        stops trading for a reason that never happened and leaves an operator
+        looking for a losing streak that does not exist.
+        """
         if not isinstance(event, PositionClosed):
+            return
+        if event.exit_notional is not None:
+            _logger.warning(
+                "risk_result_skipped_unattributed",
+                position_id=str(event.aggregate_id),
+                mint=str(event.token.mint) if event.token else None,
+                note="close carried no attributable entry; not counted toward the loss streak",
+            )
             return
         try:
             await self._manager.record_trade_result(is_win=float(event.realized_pnl.amount) > 0)
