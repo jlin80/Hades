@@ -2809,25 +2809,227 @@ not.** Five tests, four failing against the old provider; the fifth pins that an
 ordinary base-token lookup is untouched, because this is a filter and not a
 rewrite.
 
-### Intelligence: the wall was the RPC, and the claim needs correcting
+### Intelligence: "zero rows" was a window, not a state — but a real wall was found anyway
 
 §6v recorded Intelligence producing "zero rows across three append-only tables"
-and called it an undiagnosed separate wall. Measured today: `wallet_profiles`
-**10,377**, `wallet_relationships` **1,108**, `intel_clusters` 7 — the tables were
-never structurally empty, and the observation in §6v was a window, not a state.
-What is true is that **nothing has been written in the last 30 minutes**, which
-matches a platform whose RPC answers `401`. No separate wall is demonstrated; the
-question reopens when the provider is healthy, and not before.
+and called it an undiagnosed separate wall. First correction: `wallet_profiles`
+holds **10,377** rows and `wallet_relationships` **1,108** — the tables were never
+structurally empty. What was true in the moment was narrower: nothing had been
+written in the preceding 30 minutes, which matched a platform whose RPC answered
+`401`.
 
-### Still not fixed, and it gates everything
+The Helius key was then installed properly (see below), and holders/clusters
+resumed — `hades_security_clusters_detected_total` moved to 3 within the hour.
+**Intelligence tables still did not gain a single row.** That is not RPC-shaped
+any more, and re-opened the question with better evidence available than §6v had.
+The mechanism is documented in full in §6x, immediately below: it is not a defect
+in the Intelligence context, and not the RPC. Left here so the correction is not
+lost in the merge of two sessions' worth of "not diagnosed yet."
 
-The rotated Helius key **is still not in the CT's `.env`**: the file's last
-modification is this session's fallback edit, and the configured endpoint answers
-`401` with the same key prefix as before. A fallback to `api.mainnet-beta.solana.com`
-plus a second public spare is configured and failing over correctly
-(`rpc_endpoint_switched` in the logs), which restores `getAccountInfo` — but no
-free provider serves `getTokenLargestAccounts`, so every assessment still runs
-without holders and therefore without clusters. **Degraded, not restored.**
+### The Helius key, installed
+
+The rotated key from `hades-helius-key-rotated` (memory) was pasted into
+`SOLANA_RPC_HTTP_URL` / `SOLANA_RPC_WS_URL` on the CT and the worker
+force-recreated. Confirmed by prefix change (`7ba2…` → `c435…`) and by outcome:
+**zero `401` and zero `holders_read_failed`** in the following 15 minutes, against
+tens of thousands before. `mint_account` and `holders` assemble-step latency
+dropped from the 12 s timeout ceiling to **3.5 s and 5.5 s average** respectively.
+The two public fallbacks configured earlier this session remain in
+`SOLANA_RPC_FALLBACK_URLS` and are not needed while Helius is healthy, but stay
+as the documented spare.
+
+**Not yet true:** that this alone restores end-to-end throughput. See §6x.
+
+---
+
+## 6x. The lag isn't only slow — it can drop a result the moment it's computed (2026-08-12)
+
+**Status: strong inference from measured rates, not a traced single event.
+Flagged for the next session, not fixed here.**
+
+### The question this answers
+
+With the RPC finally healthy, Security resumed producing real assessments —
+holders and clusters both — and Intelligence still wrote nothing. §6v's "wall,
+not diagnosed" reopened with the RPC eliminated as a candidate cause. This is
+what the measurement found.
+
+### The mechanism
+
+`RedisEventBus.publish()` never calls a handler directly. It always does one
+thing: `XADD` the event onto `hades.events:stream`, the same stream the raw
+discovery pipeline uses. A handler only ever sees an event when **this process's
+own `worker` consumer group reads it back off that stream** — publish and
+subscribe are decoupled through the queue even when both sides live in the same
+Python process.
+
+Measured mid-session: the `worker` group's `last-delivered-id` decoded to
+**2026-08-12 12:26:40 — 6.8 hours behind wall-clock** at the time of the check.
+Entries-read advanced by 4,236 over a 48-minute window: **~1.47 events/second**
+consumed, against a historical production rate of ~2.7 ev/s that does not yet
+count the events a handler itself re-injects (`SecurityScoreComputed`,
+`TokenApproved`/`TokenRejected`, occasionally `DeveloperRisk` — up to four follow-up
+publishes per token analysed). The stream is capped at `MAXLEN=50,000` with
+approximate trimming from the old end.
+
+Put together: when Security finishes analysing one of the 6.8-hour-old backlog
+items it is currently working through, it publishes `SecurityScoreComputed`
+**now** — which lands near the stream's current tail, not anywhere near the
+cursor's position. The cursor is consuming slower than the stream fills, so the
+backlog does not shrink; it sits pinned near `MAXLEN`, continuously trimmed from
+the front. A freshly-published follow-up event queues behind that entire backlog
+and, on these rates, is a plausible candidate for being trimmed before the
+worker's crawling cursor ever reaches it.
+
+### Why this would explain more than Intelligence alone
+
+If correct, this is not an Intelligence-context defect. Every handler that
+reacts to *another* context's output event — Committee on `TokenApproved`, Risk
+downstream of that — competes for the same saturated, lossy budget. It is a
+candidate single mechanism for drop-offs previously treated as separate open
+questions, including the `security_approved → committee_predicted` collapse
+noted in §6u's funnel snapshot (12 → 1).
+
+It also reframes what "the lane processes one event at a time" (§6v, §6w) has
+been measuring. That ceiling describes the *raw* pipeline's throughput. This
+describes something worse for a *derived* event: not merely slow to arrive, but
+at risk of being discarded on the way, silently, with nothing downstream able to
+tell the difference between "not yet processed" and "never will be."
+
+### What would confirm or kill this
+
+Not done this session, and this is the concrete next step rather than a vague
+"investigate further":
+
+1. **Trace one specific event.** Capture the stream ID `XADD` assigns to a
+   `SecurityScoreComputed` publish, then poll whether that ID still exists in the
+   stream (`XRANGE` by ID) versus whether the `worker` group's cursor ever passes
+   it. A confirmed trim-before-read is the direct proof this write-up doesn't yet
+   have.
+2. **Measure sustained consumption vs. production over a longer, steady window**
+   (the 48-minute sample here spans a worker restart and is not a controlled
+   baseline — the same caution §6v raised about its own 610 s/120 s comparison
+   applies here).
+3. **If confirmed:** the fix is not "consume faster" alone — intra-lane
+   concurrency (§ `docs/INTRA_LANE_CONCURRENCY_2026-08-12.md`) raises throughput
+   but doesn't change that publish and consume share one lossy stream. A separate
+   stream (or priority path) for derived/follow-up events, which are typically
+   fewer and cheaper to process than raw discovery events, may be the more
+   direct fix — but that is a hypothesis to test, not a decision made here.
+
+### Still not fixed, and still gates everything else
+
+The throughput ceiling from §6v/§6w is untouched. Nothing in this session raised
+lane concurrency or changed the stream topology — by design, per
+`docs/INTRA_LANE_CONCURRENCY_2026-08-12.md`'s own rollout plan, which requires a
+healthy RPC (now true) before step 1, and explicit measurement before step 2.
+That measurement has not been taken.
+
+---
+
+## 6y. The trim confirmed: the cursor is behind entries that no longer exist (2026-08-12)
+
+**Status: §6x's inference is now measured. No code changed and nothing deployed
+in this session — the remaining actions are the operator's.**
+
+### The proof §6x asked for
+
+§6x listed a traced event as the confirmation it lacked. A cheaper and stronger
+observation was available and was not taken then: compare the `worker` group's
+`last-delivered-id` against the stream's `recorded-first-entry-id`.
+
+```
+recorded-first-entry-id   1786540031960-0
+worker last-delivered-id  1786539837416-0     <- 194 s EARLIER
+```
+
+**The cursor points into a region of the stream that has already been deleted.**
+Every entry between those two IDs was trimmed before the worker ever read it, and
+Redis does not consider consumer groups when trimming by `MAXLEN`. There is no
+recovery path and no record of what was lost: the next `XREADGROUP ... >` simply
+resumes at whatever the oldest surviving entry happens to be. §6x's "plausible
+candidate for being trimmed" is not a hypothesis any more.
+
+### And the consumption number was optimistic
+
+Six samples, 60 s apart, taken from `XINFO STREAM` / `XINFO GROUPS`:
+
+```
+t+0     added=2314389  worker read=2264211  first=1786539795511  cursor=1786539707383
+t+70    added=2314584  worker read=2264580  first=1786539837537  cursor=1786539837416
+t+143   added=2314689  worker read=2264580  first=1786539890402  cursor=1786539837416
+t+224   added=2314849  worker read=2264580  first=1786539972140  cursor=1786539837416
+t+299   added=2314963  worker read=2264580  first=1786540006998  cursor=1786539837416
+t+374   added=2315010  worker read=2264580  first=1786540031960  cursor=1786539837416
+```
+
+Production ran at **1.66 ev/s** across the window. The worker read 369 entries in
+the first 70 s and then **zero for the following 304 s** — not the 1.47 ev/s §6x
+measured, which was an average across a window that happened to contain progress.
+Meanwhile `first` advanced by 236 s of stream content: the trim kept moving while
+the cursor did not. `lag` sat at ~49,950 against `MAXLEN=50,000`, which is the
+steady state this describes — **the worker is pinned exactly one full window
+behind, so in aggregate it loses very nearly everything it does not happen to be
+holding.**
+
+### What the stall actually is
+
+`XPENDING` explains the frozen cursor. The group holds **46 messages, delivery
+count 1, all idle by the same ~142 s**, spanning 20 s of stream (`1786540068565-0`
+→ `1786540088860-0`). The worker claimed a batch and is grinding it one event at
+a time; the cursor cannot advance until the batch is done. At ~50 events per
+~300 s that is roughly 6 s of wall clock per event.
+
+So the ceiling is not only "one event at a time per lane" (§6v). It is one event
+at a time *while each event costs seconds of blocking I/O*, against a producer
+that never pauses.
+
+### A third mis-attribution, and this one is ours
+
+The worker's logs during the stall are full of `ConnectTimeout` against the
+`default` RPC endpoint, `Timeout reading from redis:6379`, `ConnectTimeout` to
+dexscreener and pumpfun, and repeated `rpc_endpoint_switched` to the public
+backup — which then answers `429`. Read alone, that is a story about failing
+providers, and it is the same story §6v told about Helius answering 500.
+
+It is not what is happening. Probed **from inside the worker container**, the
+configured Helius endpoint answers `getHealth` and `getTokenLargestAccounts` with
+HTTP 200 in under a second. Redis is at 10 % CPU and every other service talks to
+it fine. The timeouts are the worker's own: outbound calls from that process time
+out while the same calls from that same process's shell succeed.
+
+The worker sits at **21 % CPU on a 2-core CT** — so this is not CPU exhaustion
+either, and a sync call blocking the loop outright would show as a pegged core.
+The shape that fits is a starved event loop or an exhausted connection pool with
+many coroutines queued behind it: everything pooled times out at once, RPC and
+Redis and HTTP alike, in bursts.
+
+**This is not diagnosed further and should not be written up as if it were.** The
+next step is a stack dump of the running worker (`py-spy dump`) taken during a
+stall, which requires installing it into the container and is therefore an
+operator decision, not a read-only measurement.
+
+What is already safe to say: **provider blame in §6v and §6w was measured through
+this worker**, and a process whose own I/O times out is not a trustworthy vantage
+point for judging a provider. The Helius 500s were real and independently
+reproduced; the assemble-step latencies attributed to provider slowness were not,
+and inherit this doubt.
+
+### Two things that were on the pending list and are already closed
+
+- The **12 orphan `worker.*` consumer groups** are gone; the stream has 5 groups
+  (`engine`, `notification`, `scheduler`, `watchdog`, `worker`), and the four
+  besides `worker` are all at lag 0.
+- **Metadata pair attribution** beyond `pick_base_mint` was fixed in `2da01de`
+  (`test_metadata_pair_attribution.py`).
+
+### Still the operator's call
+
+1. **The kill switch is still latched at level 2** on the 2,530 fabricated losses
+   from §6v. Resetting it re-enables operation, so it is not mine to do.
+2. **`py-spy` into the worker** to turn the stall from a shape into a cause.
+3. The public RPC backups answer `429` on `getTokenLargestAccounts` and no free
+   provider serves it at all, so the spare is a spare for `getAccountInfo` only.
 
 ---
 
@@ -3144,6 +3346,53 @@ Earlier pending items remain relevant:
 ---
 
 ## Changelog of this document
+
+- **2026-08-12** — **The trim confirmed: the cursor is behind entries that no longer exist**
+  (§6y). §6x's inference is now a measurement, and by a cheaper route than the traced event
+  it asked for: the `worker` group's `last-delivered-id` sits **194 s earlier than the
+  stream's `recorded-first-entry-id`**, so the cursor points into a region already deleted —
+  `MAXLEN` trimming ignores consumer groups, there is no recovery path, and nothing records
+  what was lost. Six 60 s samples also correct §6x's own rate: production ran at 1.66 ev/s
+  while the worker read 369 entries in the first 70 s and then **zero for 304 s**, with `lag`
+  pinned at ~49,950 against `MAXLEN=50,000` — one full window behind, in steady state.
+  `XPENDING` explains the freeze: 46 messages held, delivery count 1, all idle the same
+  ~142 s — a claimed batch being ground one event at a time at ~6 s per event. And a third
+  mis-attribution, this one ours: the worker's `ConnectTimeout`s against Helius, dexscreener
+  and `redis:6379` are **not the providers** — probed from inside that same container Helius
+  answers `getHealth` and `getTokenLargestAccounts` 200 in under a second, Redis is at 10 %
+  CPU, and the worker is at 21 % CPU on 2 cores, so neither the network nor CPU exhaustion
+  fits. Shape is a starved event loop or exhausted connection pool; **deliberately not
+  diagnosed further** — the next step is `py-spy dump` during a stall, which is an operator
+  decision. Consequence recorded honestly: provider blame in §6v/§6w was measured *through*
+  this worker, and the assemble-step latencies attributed to provider slowness inherit that
+  doubt (the Helius 500s were independently reproduced and stand). Also closed while
+  verifying: the 12 orphan `worker.*` groups are gone (5 groups remain, four at lag 0), and
+  metadata pair attribution was fixed in `2da01de`. No code changed and nothing deployed.
+
+- **2026-08-12** — **The lag isn't only slow — it can drop a result the moment it's
+  computed** (§6x). Installed the rotated Helius key on the CT (`SOLANA_RPC_HTTP_URL` /
+  `SOLANA_RPC_WS_URL`), confirmed by prefix change and by zero `401`s / zero
+  `holders_read_failed` afterward, with `mint_account` and `holders` dropping from the 12 s
+  timeout ceiling to 3.5 s / 5.5 s average. Security resumed real work — clusters detected
+  again — but the Intelligence tables still gained **zero rows**, which reopens §6v's
+  "undiagnosed wall" with the RPC eliminated as the cause. Found: `RedisEventBus.publish()`
+  never calls a handler directly, it only `XADD`s onto `hades.events:stream` — the *same*
+  stream the raw discovery pipeline uses — and a handler sees an event only when this
+  process's own lagging `worker` consumer group reads it back off that stream, even for
+  cross-context events published and consumed inside one Python process. Measured mid-session:
+  the group's cursor was **6.8 hours behind wall-clock**, consuming at ~1.47 ev/s against a
+  production rate of ~2.7 ev/s that does not yet include the follow-up events a handler itself
+  re-injects (up to four publishes per token analysed). With consumption below production and
+  `MAXLEN=50,000` trimming from the old end, a `SecurityScoreComputed` published *now* for an
+  old backlog item queues behind the entire backlog and is a plausible candidate for being
+  trimmed before ever being read — not late, potentially never delivered, and indistinguishable
+  from "not yet processed" to everything downstream. **Not proven by a traced single event —
+  flagged as a strong inference for next session**, with the three concrete next steps to
+  confirm or kill it written into §6x. If real, it is a candidate single explanation for
+  drop-offs previously treated as separate (including §6u's `security_approved →
+  committee_predicted` collapse), and changes what `docs/INTRA_LANE_CONCURRENCY_2026-08-12.md`
+  needs to solve: raising lane throughput alone does not fix a queue that can lose a result
+  it already computed.
 
 - **2026-08-12** — **Two defences that were never on the path they defended** (§6w). The
   Helius key sat in `docker logs` in full, tens of thousands of times, with a redaction
