@@ -10,7 +10,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import DateTime, Float, ForeignKey, Integer, String
+from sqlalchemy import DateTime, Float, ForeignKey, Index, Integer, String
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -39,9 +39,23 @@ class MarketData(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
 
 class Feature(UUIDPrimaryKeyMixin, TimestampMixin, Base):
-    """One computed feature value for a token (the feature store)."""
+    """One computed feature value for a token (the feature store).
+
+    ``ix_features_token_id_computed_at`` exists for one query: the funnel's
+    ``count(distinct token_id) where computed_at >= window``. The single-column
+    indexes cannot serve it. ``computed_at`` is not selective — the window covers
+    essentially the whole table, since this store has no retention — so the
+    planner scans ``ix_features_token_id`` for its ordering and then fetches
+    every matching row from the heap to test ``computed_at``. Measured on the CT:
+    **36.2 s over 618,082 rows**, with the endpoint polled faster than that.
+
+    Both columns in one index makes the same plan index-only: the ordering that
+    made ``token_id`` attractive is still there, ``computed_at`` is now available
+    to filter without touching the heap, and the distinct needs no sort.
+    """
 
     __tablename__ = "features"
+    __table_args__ = (Index("ix_features_token_id_computed_at", "token_id", "computed_at"),)
 
     token_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("tokens.id", ondelete="CASCADE"), index=True, nullable=False
