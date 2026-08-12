@@ -25,6 +25,7 @@ from typing import TypeVar
 
 from hades.contexts.common.domain.value_objects import WalletAddress
 from hades.contexts.features.domain.events import FeaturesComputed
+from hades.contexts.security.application.metrics import SecurityMetrics
 from hades.contexts.security.domain.models import (
     DeveloperReputation,
     LiquidityPool,
@@ -59,6 +60,7 @@ class SecurityContextAssembler:
         top_holders: int = 20,
         honeypot_probe_usd: float = 50.0,
         fetch_holder_count: bool = False,
+        metrics: SecurityMetrics | None = None,
     ) -> None:
         self._reader = reader
         self._facts = facts_source
@@ -68,6 +70,7 @@ class SecurityContextAssembler:
         self._top_holders = top_holders
         self._probe_usd = honeypot_probe_usd
         self._fetch_count = fetch_holder_count
+        self._metrics = metrics
 
     async def build(self, event: FeaturesComputed) -> SecurityInputs:
         token = event.token
@@ -171,8 +174,23 @@ class SecurityContextAssembler:
         return max(0.0, (now - seen).total_seconds() / 60.0)
 
     async def _safe(self, coro: Awaitable[_T], default: _T, label: str) -> _T:
+        """Await one source, timed and never raising.
+
+        Timed per step because twice now the cost has been attributed to the
+        wrong place from reading the code. The aggregate said 21 seconds; making
+        the twelve funder lookups concurrent moved it to 21.1 from 25.0, which is
+        not what a dominant term does when you parallelise it. Whatever is
+        actually spending the time is one of these labels, and guessing a third
+        time would be a worse use of everyone's afternoon than a histogram.
+        """
+        started = asyncio.get_running_loop().time()
         try:
             return await coro
         except Exception as exc:  # any source failure degrades to doubt
             _logger.warning("assemble_step_failed", step=label, error=str(exc))
             return default
+        finally:
+            if self._metrics is not None:
+                self._metrics.assemble_step_seconds.labels(step=label).observe(
+                    asyncio.get_running_loop().time() - started
+                )

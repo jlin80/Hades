@@ -63,6 +63,12 @@ class SecurityMetrics:
             "honeypot probe, developer reputation, clustering)",
             buckets=(0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0),
         )
+        self.assemble_step_seconds = metrics.histogram(
+            "hades_security_assemble_step_seconds",
+            "Time spent on one assembler source, by step",
+            buckets=(0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 20.0, 30.0),
+            labelnames=("step",),
+        )
         self.analyzers_seconds = metrics.histogram(
             "hades_security_analyzers_seconds",
             "Time spent running the ten analyzers (pure computation, no I/O)",

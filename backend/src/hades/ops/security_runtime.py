@@ -203,6 +203,7 @@ class SecurityRuntime:
             top_holders=sec.top_holders,
             honeypot_probe_usd=sec.honeypot_probe_usd,
             fetch_holder_count=sec.fetch_holder_count,
+            metrics=self._metrics,
         )
 
     def _register(self) -> None:
