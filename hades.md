@@ -3033,6 +3033,128 @@ and inherit this doubt.
 
 ---
 
+## 6z. The funnel was the load (2026-08-12)
+
+**The throughput mystery three sessions chased has an answer, and it is not a
+provider. Fixed in code; not deployed — the migration and restart are the
+operator's call.**
+
+### How it was found
+
+§6y ended pointing at `py-spy`. That turned out to be unnecessary. The
+per-source histograms `f3a1686` added are exposed on the worker's `:9100`
+inside the compose network — unreachable from the host, but reachable from any
+other container — and Prometheus itself is behind the `observability` profile
+and has never been running, which is why nobody had read them. Scraped from the
+API container, with Helius healthy:
+
+```
+assemble   1318.42 / 71 = 18.57 s per token
+analyzers     0.955 / 54 =  0.018 s per token
+
+step=cluster        756.16 / 71 = 10.65 s
+step=holders        435.37 / 71 =  6.13 s
+step=honeypot       300.97 / 71 =  4.24 s
+step=mint_account   288.22 / 71 =  4.06 s
+step=stored_facts   232.99 / 71 =  3.28 s
+```
+
+`stored_facts` is the tell. It is three key lookups against local Postgres and
+it should be sub-millisecond; at **3.28 s** it says the database is the
+contended resource, not the network. `pg_stat_activity` then named it outright:
+
+```
+pid    state   secs  query
+461759 active  60.4  SELECT count(distinct(features.token_id)) FROM features WHERE computed_at >= $1
+463008 active  29.0  (same)
+462760 active  14.0  (same)
+462365 active  13.6  (same)
+463019 active  11.0  (same)
+462188 active   2.3  (same)
+```
+
+**Six concurrent copies of one query, ageing to a minute.** Nine of the pool's
+connections were on it. Everything else — including the Security Engine's own
+reads — queued behind.
+
+### The query, and why no index was helping
+
+It is `GET /api/v1/funnel`, the dashboard's pipeline funnel. `EXPLAIN ANALYZE`:
+
+```
+Aggregate  (actual time=36204.228..36204.232)
+  ->  Index Scan using ix_features_token_id on features
+        (actual time=107.864..28810.133 rows=618082)
+        Filter: (computed_at >= now() - '24:00:00')
+        Buffers: shared hit=17052 read=731
+Execution Time: 36271.868 ms
+```
+
+**36.2 seconds.** `ix_features_computed_at` exists and the planner declines it,
+correctly: the feature store has no retention, so a 24-hour window matches
+618,082 of 618,082 rows and the predicate filters nothing. It scans
+`ix_features_token_id` instead for the ordering `count(distinct)` wants, and
+pays a heap visit per row to test `computed_at`.
+
+The dashboard polls faster than 36 s. So the requests stacked — and each new
+poller made the pipeline it was built to observe slower.
+
+### The shape
+
+The module docstring said, unqualified: *"Read-only and window-scoped, so it
+stays cheap enough for the dashboard to poll."* Read-only it is. Cheap it never
+was, and nothing measured it. **An endpoint built to explain why nothing was
+getting through had become a reason nothing was getting through** — the same
+shape as §6t, where the discovery-source report killed the informant, and the
+same family as every setting in §6v/§6w that promised behaviour the code never
+had. This one is worse in one respect: it was not inert, it was actively
+harmful, and it presented as slow providers.
+
+### The two fixes
+
+**An index that serves the query** (migration `0012`): composite
+`(token_id, computed_at)`. It keeps the plan the planner already wants and makes
+it index-only — the ordering is still there, `computed_at` is now in the index,
+and the 618,082 heap visits disappear. Built `CONCURRENTLY` because `features`
+takes continuous inserts and an index added to stop the platform starving itself
+should not block the write path going in.
+
+**Single-flight with a 60 s TTL** on the endpoint. This is the load-bearing
+half, and it would have been the right fix even with a fast query: an index
+makes one call cheap, but only single-flight stops a poll loop from running N of
+them at once. Pollers arriving during a computation wait for it and share its
+answer. Failures are not cached — a cached error would outlive its cause and
+report a dead pipeline for a minute after recovery, on the one endpoint an
+operator checks to find out.
+
+### What this does and does not claim
+
+It explains DB-bound latency: `stored_facts` at 3.28 s, and the worker's ~6 s
+per event that pins the consumer group a full `MAXLEN` window behind (§6y). It
+is a plausible contributor to the `ConnectTimeout`s, via CPU contention on a
+2-core CT, but **that is not demonstrated** and this write-up does not claim it.
+The `cluster` step at 10.65 s is genuinely RPC-bound and untouched by any of
+this; it is now the largest single step.
+
+**The index's benefit is predicted from the plan, not measured.** It removes
+618,082 heap fetches, which is a sound reason to expect a large gain, but this
+project has three sessions' worth of evidence that reasoning about latency from
+reading is not the same as measuring it. The number to record is the one taken
+on the CT after the migration runs, and it is not in this entry.
+
+### Gate
+
+`ruff check` clean · `mypy --strict` 23 errors, **identical to baseline, none
+new** · **910 tests pass**, one pre-existing Windows-only healthcheck failure.
+
+### Not deployed
+
+Migration `0012` plus an API restart. Deliberately left for the operator,
+together with the kill switch still latched at level 2 on §6v's fabricated
+losses.
+
+---
+
 ## 7. Testing
 
 `backend/tests` (379 tests, all green; `mypy --strict` clean; `ruff` clean; suite runs
@@ -3346,6 +3468,32 @@ Earlier pending items remain relevant:
 ---
 
 ## Changelog of this document
+
+- **2026-08-12** — **The funnel was the load** (§6z). The throughput mystery three sessions
+  chased is not a provider: it is `GET /api/v1/funnel`, the dashboard's own diagnostic
+  endpoint. `py-spy` proved unnecessary — the per-source histograms `f3a1686` added are
+  exposed on the worker's `:9100` inside the compose network (unreachable from the host,
+  reachable from any sibling container; Prometheus is behind the never-started
+  `observability` profile, which is why nobody had read them). They showed `stored_facts` —
+  three key lookups against *local* Postgres — at **3.28 s**, which points at the database
+  rather than the network, and `pg_stat_activity` then named it: **six concurrent copies of
+  `count(distinct features.token_id)`**, ageing to 60 s, holding nine pool connections that
+  the Security Engine's reads queued behind. `EXPLAIN ANALYZE`: **36.2 s**, scanning
+  `ix_features_token_id` over 618,082 rows with a heap visit each, because the feature store
+  has no retention so a 24 h window filters nothing and `ix_features_computed_at` is
+  correctly declined. The dashboard polls faster than the query returns, so requests stacked
+  and each new poller slowed the pipeline it was built to observe — §6t's shape exactly, and
+  the docstring claimed "cheap enough for the dashboard to poll" with nothing measuring it.
+  Two fixes: migration `0012` adds a composite `(token_id, computed_at)` index built
+  `CONCURRENTLY` (makes the plan index-only, removes the 618,082 heap fetches), and the
+  endpoint becomes single-flight with a 60 s TTL — the load-bearing half, since an index
+  makes one call cheap but only single-flight stops a poll loop running N at once; failures
+  are not cached. Explains `stored_facts` and the worker's ~6 s per event that pins the
+  consumer group a full window behind (§6y); the `cluster` step at 10.65 s is genuinely
+  RPC-bound and untouched, now the largest step. **The index's gain is predicted from the
+  plan, not measured** — the number that counts is the one taken on the CT after the
+  migration runs. Gate: `ruff` clean, `mypy --strict` 23 errors identical to baseline,
+  **910 tests pass**. **Not deployed** — the migration and restart are the operator's call.
 
 - **2026-08-12** — **The trim confirmed: the cursor is behind entries that no longer exist**
   (§6y). §6x's inference is now a measurement, and by a cheaper route than the traced event

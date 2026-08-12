@@ -14,12 +14,29 @@ position — plus the reasons the Risk Manager gave for the rejections. The
 cliff between two adjacent numbers is the answer, and the reject-reason
 breakdown turns "risk rejected everything" into which policy did it.
 
-Read-only and window-scoped, so it stays cheap enough for the dashboard to poll.
+Read-only and window-scoped. That was once assumed to make it cheap enough for
+the dashboard to poll; it does not. Measured on CT 203, the ``features`` stage
+alone took **36.2 s**, and the dashboard polls faster than the query returns, so
+requests stacked — six concurrent copies, the oldest 60 s in — each holding a
+connection that the Security Engine's own reads then queued behind. An endpoint
+built to explain why nothing was getting through had become a reason nothing was
+getting through, which is the same shape as the discovery-source incident this
+platform already has a write-up for.
+
+Two changes keep it honest. Migration ``0012`` gives the counting query an index
+that serves it, and the results are computed **once per window per TTL, with one
+in-flight computation at a time**: pollers that arrive during a computation wait
+for it and share its answer instead of starting their own. The cache is what
+bounds the damage — an index makes the query fast, but nothing except
+single-flight stops a poll loop from multiplying whatever the query costs.
 """
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
+from time import monotonic
 from typing import Any
 
 from fastapi import APIRouter, Depends, Query
@@ -37,6 +54,67 @@ from hades.shared_kernel.persistence.models.trades import Position, Trade
 
 router = APIRouter(prefix="/api/v1/funnel", tags=["funnel"])
 
+FUNNEL_CACHE_TTL_SECONDS = 60.0
+"""How long a computed funnel stays servable.
+
+Sized against the cost of being wrong in each direction: a minute-old funnel
+still answers "is anything getting through", while a window shorter than the
+query's own duration puts the platform back to computing it continuously.
+"""
+
+
+class _SingleFlightCache:
+    """One in-flight computation per key, and a TTL on what it produced.
+
+    The TTL alone would not be enough. Ten pollers arriving while the cache is
+    cold all miss, and ten identical 36 s queries is exactly the failure this
+    exists to prevent — so the lock is the load-bearing half: whoever arrives
+    during a computation waits for it and takes its result.
+
+    Failures are deliberately not cached. A cached error would outlive the
+    hiccup that caused it and report a broken pipeline for a minute after the
+    pipeline recovered, on the one endpoint an operator consults to find out.
+    """
+
+    def __init__(self, ttl_seconds: float) -> None:
+        self._ttl = ttl_seconds
+        self._locks: dict[int, asyncio.Lock] = {}
+        self._entries: dict[int, tuple[float, dict[str, Any]]] = {}
+
+    def _fresh(self, key: int) -> dict[str, Any] | None:
+        entry = self._entries.get(key)
+        if entry is None:
+            return None
+        computed_at, payload = entry
+        if monotonic() - computed_at > self._ttl:
+            return None
+        return payload
+
+    async def get(
+        self, key: int, compute: Callable[[], Awaitable[dict[str, Any]]]
+    ) -> dict[str, Any]:
+        hit = self._fresh(key)
+        if hit is not None:
+            return hit
+        lock = self._locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            # Re-checked inside the lock: a caller that queued here while the
+            # winner was computing wants the winner's answer, not its own query.
+            hit = self._fresh(key)
+            if hit is not None:
+                return hit
+            payload = await compute()
+            self._entries[key] = (monotonic(), payload)
+            return payload
+
+    def clear(self) -> None:
+        """Drop everything cached. For tests, and for nothing else."""
+        self._entries.clear()
+        self._locks.clear()
+
+
+_cache = _SingleFlightCache(FUNNEL_CACHE_TTL_SECONDS)
+
 
 @router.get("", summary="Pipeline funnel — where tokens stop becoming trades")
 async def funnel(
@@ -51,7 +129,6 @@ async def funnel(
     of activity per stage, not a single cohort — which is what "is anything
     getting through right now" actually asks.
     """
-    since = datetime.now(UTC) - timedelta(hours=hours)
     empty: dict[str, Any] = {
         "window_hours": hours,
         "stages": [],
@@ -62,68 +139,73 @@ async def funnel(
         return empty
 
     try:
-        async with container.database.session() as session:
-            discovered = await session.scalar(
-                select(func.count()).select_from(Token).where(Token.first_seen_at >= since)
-            )
-            featured = await session.scalar(
-                select(func.count(func.distinct(Feature.token_id))).where(
-                    Feature.computed_at >= since
-                )
-            )
-            assessed = await session.scalar(
-                select(func.count(func.distinct(SecurityAssessmentRecord.mint))).where(
-                    SecurityAssessmentRecord.analyzed_at >= since
-                )
-            )
-            security_ok = await session.scalar(
-                select(func.count(func.distinct(SecurityAssessmentRecord.mint))).where(
-                    SecurityAssessmentRecord.analyzed_at >= since,
-                    SecurityAssessmentRecord.approved.is_(True),
-                )
-            )
-            predicted = await session.scalar(
-                select(func.count(func.distinct(CommitteePredictionRecord.mint))).where(
-                    CommitteePredictionRecord.at >= since,
-                    CommitteePredictionRecord.shadow.is_(False),
-                )
-            )
-            risk_seen = await session.scalar(
-                select(func.count(func.distinct(RiskDecisionRecord.mint))).where(
-                    RiskDecisionRecord.at >= since
-                )
-            )
-            risk_ok = await session.scalar(
-                select(func.count(func.distinct(RiskDecisionRecord.mint))).where(
-                    RiskDecisionRecord.at >= since,
-                    RiskDecisionRecord.decision == "approve",
-                )
-            )
-            filled = await session.scalar(
-                select(func.count())
-                .select_from(Trade)
-                .where(Trade.filled_at >= since, Trade.status == "filled")
-            )
-            opened = await session.scalar(
-                select(func.count()).select_from(Position).where(Position.opened_at >= since)
-            )
-            open_now = await session.scalar(
-                select(func.count()).select_from(Position).where(Position.status == "open")
-            )
-            reasons = (
-                await session.execute(
-                    select(RiskDecisionRecord.reject_reason, func.count())
-                    .where(
-                        RiskDecisionRecord.at >= since,
-                        RiskDecisionRecord.decision != "approve",
-                        RiskDecisionRecord.reject_reason.is_not(None),
-                    )
-                    .group_by(RiskDecisionRecord.reject_reason)
-                    .order_by(desc(func.count()))
-                )
-            ).all()
+        return await _cache.get(hours, lambda: _compute(container, hours))
     except Exception as exc:  # the dashboard must render even on a DB hiccup
         return {**empty, "diagnosis": f"Funnel query failed: {exc}"}
+
+
+async def _compute(container: Container, hours: int) -> dict[str, Any]:
+    """The funnel's actual queries. Raises, so failures are never cached."""
+    since = datetime.now(UTC) - timedelta(hours=hours)
+    assert container.database is not None  # guarded by the caller
+    async with container.database.session() as session:
+        discovered = await session.scalar(
+            select(func.count()).select_from(Token).where(Token.first_seen_at >= since)
+        )
+        featured = await session.scalar(
+            select(func.count(func.distinct(Feature.token_id))).where(Feature.computed_at >= since)
+        )
+        assessed = await session.scalar(
+            select(func.count(func.distinct(SecurityAssessmentRecord.mint))).where(
+                SecurityAssessmentRecord.analyzed_at >= since
+            )
+        )
+        security_ok = await session.scalar(
+            select(func.count(func.distinct(SecurityAssessmentRecord.mint))).where(
+                SecurityAssessmentRecord.analyzed_at >= since,
+                SecurityAssessmentRecord.approved.is_(True),
+            )
+        )
+        predicted = await session.scalar(
+            select(func.count(func.distinct(CommitteePredictionRecord.mint))).where(
+                CommitteePredictionRecord.at >= since,
+                CommitteePredictionRecord.shadow.is_(False),
+            )
+        )
+        risk_seen = await session.scalar(
+            select(func.count(func.distinct(RiskDecisionRecord.mint))).where(
+                RiskDecisionRecord.at >= since
+            )
+        )
+        risk_ok = await session.scalar(
+            select(func.count(func.distinct(RiskDecisionRecord.mint))).where(
+                RiskDecisionRecord.at >= since,
+                RiskDecisionRecord.decision == "approve",
+            )
+        )
+        filled = await session.scalar(
+            select(func.count())
+            .select_from(Trade)
+            .where(Trade.filled_at >= since, Trade.status == "filled")
+        )
+        opened = await session.scalar(
+            select(func.count()).select_from(Position).where(Position.opened_at >= since)
+        )
+        open_now = await session.scalar(
+            select(func.count()).select_from(Position).where(Position.status == "open")
+        )
+        reasons = (
+            await session.execute(
+                select(RiskDecisionRecord.reject_reason, func.count())
+                .where(
+                    RiskDecisionRecord.at >= since,
+                    RiskDecisionRecord.decision != "approve",
+                    RiskDecisionRecord.reject_reason.is_not(None),
+                )
+                .group_by(RiskDecisionRecord.reject_reason)
+                .order_by(desc(func.count()))
+            )
+        ).all()
 
     stages = [
         _stage("discovered", "Tokens discovered by the Scanner", discovered),
