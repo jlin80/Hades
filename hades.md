@@ -2606,6 +2606,231 @@ and a third attempt without a written design would be the pattern rather than ba
 
 ---
 
+## 6v. Two wrong attributions, and the provider that was answering 500 (2026-08-11/12)
+
+The previous session closed by naming the throughput ceiling structural. This one measured it
+instead, got the mechanism wrong twice, and both times the correction came from a number rather
+than from reading more code. The record here is deliberately shaped around that, because the
+lesson outlasts the fix.
+
+### Metering first, because the last answer could not be shown
+
+§6u found the assembler's chained awaits by reading the code and benchmarking in isolation, and
+then could not demonstrate on the live deployment whether the fix had helped. `analysis_seconds`
+had only ever covered the engine, so **the part that turned out to be the entire cost was the
+part nothing measured**.
+
+`assemble_seconds` (I/O) and `analyzers_seconds` (the ten pure functions) are now separate
+histograms, permanent rather than a temporary probe: "analyzers or I/O?" is not a question this
+platform asks once. `_analyze_all` splits into a timing wrapper over `_analyze_each` so the
+per-analyzer error isolation is untouched — a raising analyzer still produces its ANALYZER_ERROR
+report, and the observation lives in a `finally`.
+
+The answer was not close:
+
+```
+hades_security_assemble_seconds   1563.34 / 73 = 21.42 s per token   (I/O)
+hades_security_analyzers_seconds     0.638 / 64 =  0.010 s per token (compute)
+```
+
+Roughly **2,140 to 1**. The brief that opened these sessions named the ten analyzers as the
+suspect; they cost ten milliseconds.
+
+### Wrong attribution #1: twelve serial calls, not four serial retries
+
+`FundingGraphClusterDetector.detect` awaited `get_funders` once per holder over the top twelve —
+twelve independent RPC queries about twelve different wallets, ordered by nothing but the loop.
+At the ~1.8 s each the live provider was returning, that appeared to be the whole 21 seconds.
+
+I had first read `RPC_MAX_ATTEMPTS=4` as four serial retries multiplying the latency. It is not:
+`RpcManager.call` iterates ranked *candidates*, so a single configured provider means a single
+attempt. Only the metric distinguished twelve calls from four.
+
+Bounded to four in flight rather than gathered wholesale, and **the bound is load-bearing**. The
+RPC manager rate-limits per provider and this deployment has one, so a burst of twelve would be
+admitted as four and throttled for the rest — which the detector reports as reduced coverage, and
+the Security Engine reads coverage gaps as doubt. An unbounded version would have bought latency
+by quietly lowering the quality of the verdict, the exact trade this engine exists to refuse.
+Results are consumed in the sample's order, not completion order, so cluster membership cannot
+depend on which RPC answered first. The timing test is built *without* passing `concurrency`, so
+against the sequential version it fails on elapsed time (0.750 s against a 0.35 s ceiling) rather
+than on an unknown keyword — a regression test failing with `TypeError` would have proved only
+that a signature changed.
+
+### Wrong attribution #2: the fix moved 15%
+
+Measured across the deploy: **25.0 s per token (n=106) → 21.1 s (n=14)**. Parallelising a
+dominant term does not produce a 15% aggregate move, so "nearly all of the 21 seconds was here"
+was wrong too, and the small sample means part of even that gap may be noise.
+
+Both mistakes came from reasoning about latency by reading code. So the guessing stops: `_safe`
+already labels every source it awaits, and each label now gets its own histogram. Buckets run to
+30 s deliberately — the default tops out well below what this stage costs, and a metric whose
+largest bucket is smaller than the value it measures reports everything as `+Inf` and answers
+nothing.
+
+### The root cause: a provider returning 500, and a fallback list nothing read
+
+```
+mint_account   12.04 s      <- exactly RPC_REQUEST_TIMEOUT_SECONDS
+holders        11.95 s      <- exactly the timeout
+honeypot        3.92 s
+stored_facts    1.27 s
+cluster         0.00 s
+```
+
+**Two steps averaging precisely the timeout are not slow, they are failing.** Tested directly
+from the worker: the configured Helius endpoint returns `HTTP 500` to `getAccountInfo` and
+`getTokenLargestAccounts` while `getHealth` still succeeds; the public RPC serves the same call
+in 0.45 s.
+
+So the platform had been blind for days. Security analysed every token with no mint account and
+no holders, therefore no clusters and no deployer across 176 assessments — empty Intelligence
+batches, nothing reaching the Committee, Risk at zero, Exploration never called, zero lessons.
+Every symptom three sessions of work had been chasing separately, from one provider.
+
+`build_endpoints` took the primary URL and stopped. `SOLANA_RPC_FALLBACK_URLS` has existed since
+Phase 2 and is documented in `.env.example` as "comma-separated backups", and **was read by
+nothing** — so a platform with automatic failover, health-scored provider ranking and
+parked-provider recovery could still be taken off the air entirely by one provider.
+`RPC_MAX_ATTEMPTS=4` was inert for the same reason. The fourth setting in two sessions promising
+a behaviour the code never had, after `dedup_key`, `WATCHDOG_UNHEALTHY_AFTER_MISSED_BEATS` and
+`API_AUTH_ENABLED`.
+
+Backups rank below the primary so the paid provider stays preferred while healthy, and
+`RPC_ENDPOINTS` still wins outright when set — an operator who described providers with names,
+priorities and rate limits said something more precise than a URL list. The five tests fail
+against the old builder with `TypeError` rather than on behaviour, which is the honest ceiling:
+the parameter did not exist, so the old code cannot express the property to get it wrong.
+
+**This does not by itself restore the platform.** It makes a spare *possible*; none is configured
+yet, and the Helius key still needs renewing.
+
+### 2,530 consecutive losses that were never trades
+
+Found while verifying the API deploy. Hours after the book was reset to a clean 1,000 USD, the
+persisted control state read `kill_switch_level 2`, reason **"2530 consecutive losses"**.
+
+There had been no 2,530 trades. A gap in §6u's own fix: the Portfolio Manager now refuses a close
+it cannot attribute, but `risk_runtime` still counted every one of them. When the Execution
+Engine cannot name the entry it is closing against it reports the exit fee as realised PnL — a
+small negative — and the runtime asked only `realized_pnl > 0`, so every unattributable close was
+a loss. `exit_notional` is set on exactly those events and no others, which makes it the honest
+discriminator rather than a heuristic.
+
+**A halt founded on fabricated losses is not a conservative halt, it is a wrong one.** It stops
+trading for a reason that never happened and sends an operator looking for a streak that does not
+exist. The kill switch is the last line, and a last line trippable by an accounting artefact is
+worth less than one that is not. Three tests, two verified against the unfiltered handler,
+including the production shape of 2,530 unattributable closes leaving the streak untouched; the
+third pins that this is a filter and not a mute.
+
+**Not fixed here, because it re-enables trading and is the operator's call:** the live kill switch
+is still latched at level 2 on that fabricated count.
+
+### Open, and not diagnosed
+
+Intelligence produced **zero rows across three append-only tables against nine security
+assessments** on an idle box — a separate wall between `security_approved` and the Committee.
+Some of it is downstream of the dead RPC, but that has not been demonstrated. The lane still
+processes one event at a time; concurrency *within* a lane remains untried and unwritten.
+
+---
+
+## 6w. Two defences that were never on the path they defended (2026-08-12)
+
+Two fixes this session, and both have the same shape as `dedup_key`,
+`WATCHDOG_UNHEALTHY_AFTER_MISSED_BEATS`, `API_AUTH_ENABLED` and
+`SOLANA_RPC_FALLBACK_URLS` before them: a mechanism that exists, is tested, and
+does not run where it matters.
+
+### The redaction that scrubbed everything except this platform's own logs
+
+`docker logs` held the Helius API key in full, tens of thousands of times — with
+`_SecretRedactingFilter`, `redact_secrets`, a pattern covering `api-key=`, and a
+green `test_log_redaction.py` all in place. The module's own docstring describes
+the incident it was written for.
+
+Two independent gaps, either alone sufficient:
+
+**The filter only ever ran on `str` messages.** A structlog record delivered
+through `ProcessorFormatter.wrap_for_formatter` carries the **event dict** in
+`record.msg`, so `isinstance(record.msg, str)` is `False` for every line this
+platform emits itself. The `httpx` case the tests exercised — a plain string
+message from a foreign logger — passed, and was the only case that did. Verified
+by instrumenting the real pipeline: `('dict', "{'error': ..., 'event':
+'rpc_call_failed'}")` for a structlog line against `('str', ...)` for an `httpx`
+one.
+
+**The filter was attached to the stdout handler only.** `_attach_file_handlers`
+adds a `_DomainFilter` and no redaction, so every rotating file sink kept whatever
+stdout was scrubbing — including `hades.log`.
+
+The fix moves redaction into the shared `ProcessorFormatter` processor chain,
+which every handler runs, and extends `_redact_value` to recurse through nested
+mappings and sequences (an `error` string is the common case, but nothing stopped
+a handler logging `context={"url": ...}`). The filter's `str`-blindness is fixed
+too, as the second defence this module always claimed to have.
+
+The ring buffer was *not* affected: `_ring_buffer_processor` already scrubbed its
+own copy, so the dashboard terminal — the wider audience the original fix was
+most worried about — was genuinely protected. Only the sinks nobody tested
+end-to-end leaked.
+
+Four new tests, all four verified failing against the old code, two of them
+rendering through a fully configured pipeline rather than calling a helper. That
+distinction is the point: every pre-existing test exercised a helper in
+isolation, which is exactly how a live key reached production logs with the suite
+green.
+
+### A metadata lookup that answered a question nobody asked
+
+§6u recorded that Wrapped SOL had been bought, and that the position was labelled
+`FOGO` — *"not localised, and therefore not fixed: metadata attribution is wrong
+somewhere beyond this function"*. It is localised now.
+
+`DexScreenerMetadataProvider.collect` read `pairs[0]["baseToken"]`. The endpoint
+returns **every pair the mint appears in, on either side**, in an order the caller
+does not control, so that line answers "what leads the list?" rather than "what is
+this token?". It is right whenever the requested mint happens to be a base, and
+**wrong by construction for a quote asset** — Wrapped SOL is the quote of nearly
+every Solana pair, so the lookup returned whichever coin led its pair list.
+
+The failure mode is the worst available: right mint, wrong name, and a payload
+that looks like a successful lookup to everything downstream. Same family as the
+minted `position_id` in §6u — a fabricated value is more dangerous than a missing
+one, because nothing rejects it.
+
+The provider now finds the pair side whose `address` equals the requested mint
+and reads *that* side, checking `quoteToken` as well as `baseToken`; when no pair
+mentions the mint it returns `None`. **No metadata is a reportable state — the
+quality validator already tracks a missing symbol — and a neighbour's metadata is
+not.** Five tests, four failing against the old provider; the fifth pins that an
+ordinary base-token lookup is untouched, because this is a filter and not a
+rewrite.
+
+### Intelligence: the wall was the RPC, and the claim needs correcting
+
+§6v recorded Intelligence producing "zero rows across three append-only tables"
+and called it an undiagnosed separate wall. Measured today: `wallet_profiles`
+**10,377**, `wallet_relationships` **1,108**, `intel_clusters` 7 — the tables were
+never structurally empty, and the observation in §6v was a window, not a state.
+What is true is that **nothing has been written in the last 30 minutes**, which
+matches a platform whose RPC answers `401`. No separate wall is demonstrated; the
+question reopens when the provider is healthy, and not before.
+
+### Still not fixed, and it gates everything
+
+The rotated Helius key **is still not in the CT's `.env`**: the file's last
+modification is this session's fallback edit, and the configured endpoint answers
+`401` with the same key prefix as before. A fallback to `api.mainnet-beta.solana.com`
+plus a second public spare is configured and failing over correctly
+(`rpc_endpoint_switched` in the logs), which restores `getAccountInfo` — but no
+free provider serves `getTokenLargestAccounts`, so every assessment still runs
+without holders and therefore without clusters. **Degraded, not restored.**
+
+---
+
 ## 7. Testing
 
 `backend/tests` (379 tests, all green; `mypy --strict` clean; `ruff` clean; suite runs
@@ -2919,6 +3144,58 @@ Earlier pending items remain relevant:
 ---
 
 ## Changelog of this document
+
+- **2026-08-12** — **Two defences that were never on the path they defended** (§6w). The
+  Helius key sat in `docker logs` in full, tens of thousands of times, with a redaction
+  filter, a pattern matching `api-key=` and a green `test_log_redaction.py` all in place —
+  because the filter tested `isinstance(record.msg, str)` and **a structlog record carries the
+  event dict in `record.msg`**, so every line the platform emits itself went through untouched
+  while the `httpx` string case the tests covered passed; and because the filter hung off the
+  stdout handler alone, leaving every rotating file sink unscrubbed. Redaction now lives in the
+  shared `ProcessorFormatter` chain that all handlers run, and recurses into nested mappings and
+  sequences. The ring buffer — and therefore the dashboard terminal — was genuinely protected
+  all along. Also **localised the `FOGO` mislabel** left open in §6u:
+  `DexScreenerMetadataProvider` read `pairs[0]["baseToken"]` from an endpoint that returns every
+  pair a mint appears in **on either side**, which is right only when the mint happens to be a
+  base and **wrong by construction for a quote asset** — so a lookup for Wrapped SOL returned
+  whichever coin led the list. Right mint, wrong name, indistinguishable from success
+  downstream: the same family as §6u's minted `position_id`. It now matches the requested mint
+  against both sides and returns `None` when no pair mentions it. **Correction to §6v:**
+  Intelligence is not structurally empty — `wallet_profiles` holds 10,377 rows and
+  `wallet_relationships` 1,108; the "zero rows" observation was a window, not a state, and
+  nothing new has been written for 30 minutes because **the rotated Helius key is still not in
+  the CT's `.env`** (the endpoint answers `401` with the same key prefix). Two public RPC spares
+  are configured and failing over correctly, which restores `getAccountInfo` — but no free
+  provider serves `getTokenLargestAccounts`, so assessments still run without holders. Gate:
+  **903 tests** (+9), `ruff` clean, `mypy --strict` unchanged from baseline. Also written:
+  `docs/INTRA_LANE_CONCURRENCY_2026-08-12.md`, the design argument the two rolled-back lane
+  deploys never had.
+
+- **2026-08-11/12** — **Two wrong attributions, and the provider that was answering 500**
+  (§6v). The Security handler was metered properly at last — `assemble_seconds` (I/O) against
+  `analyzers_seconds` (the ten pure functions) — and returned **21.42 s vs 0.010 s per token, a
+  ratio of ~2,140 to 1**: the analyzers the original brief suspected cost ten milliseconds.
+  Making `FundingGraphClusterDetector`'s twelve serial funder lookups concurrent (bounded to
+  four in flight, because the RPC manager rate-limits per provider and coverage gaps are read as
+  doubt) moved the aggregate only **25.0 s → 21.1 s**, which is not what parallelising a
+  dominant term looks like — the second wrong attribution of the session, after reading
+  `RPC_MAX_ATTEMPTS=4` as four serial retries when `RpcManager.call` iterates ranked
+  *candidates*. Per-source histograms then named the real cause: `mint_account` at **12.04 s**
+  and `holders` at **11.95 s**, each *exactly* `RPC_REQUEST_TIMEOUT_SECONDS` — the configured
+  Helius endpoint returns `HTTP 500` to `getAccountInfo` and `getTokenLargestAccounts` while
+  `getHealth` still succeeds. **The platform had been blind for days**: no mint account, no
+  holders, no clusters, no deployer across 176 assessments, empty Intelligence batches, nothing
+  reaching the Committee, Risk at zero, Exploration never called, zero lessons. `build_endpoints`
+  took the primary URL and stopped, so **`SOLANA_RPC_FALLBACK_URLS` — documented since Phase 2 —
+  was read by nothing**, and a platform with automatic failover could be taken off the air by one
+  provider; the fourth setting in two sessions promising a behaviour the code never had. Also:
+  the kill switch was found latched at level 2 on **"2530 consecutive losses" that were never
+  trades** — `risk_runtime` counted the unattributable closes the Portfolio Manager had started
+  refusing, whose exit fee reads as a small negative PnL; `exit_notional` is now the
+  discriminator. **Still open**: no spare RPC configured and the Helius key unrenewed, the kill
+  switch still latched (operator's call), and Intelligence producing zero rows against nine
+  assessments — undiagnosed. Gate: **894 tests** (+12), `ruff` clean, `mypy --strict` identical
+  to baseline (23 pre-existing errors, none new).
 
 - **2026-08-11** — **The book that could not name what it was paid for** (§6u). Investigated
   after the dashboard showed absurd figures; the book of record held cash at **-37,713 USD**

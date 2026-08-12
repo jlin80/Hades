@@ -102,11 +102,43 @@ def _ring_buffer_processor(
     return event_dict
 
 
+def _redact_value(value: Any) -> Any:
+    """Scrub every string reachable from ``value``, preserving its structure.
+
+    A one-level pass over the event dict is not enough: ``error`` is usually a
+    string, but a handler is free to log ``context={"url": ...}`` or a list of
+    failed endpoints, and a credential leaks through whichever container happens
+    to be carrying it.
+    """
+    if isinstance(value, str):
+        return redact_secrets(value)
+    if isinstance(value, Mapping):
+        return {key: _redact_value(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return type(value)(_redact_value(item) for item in value)
+    return value
+
+
 def _redact_record(record: dict[str, Any]) -> dict[str, Any]:
-    for key, value in record.items():
-        if isinstance(value, str):
-            record[key] = redact_secrets(value)
-    return record
+    return {key: _redact_value(value) for key, value in record.items()}
+
+
+def _redact_processor(
+    _logger: Any, _method: str, event_dict: Mapping[str, Any]
+) -> Mapping[str, Any]:
+    """structlog processor: scrub the event dict on its way to *every* sink.
+
+    This sits in the shared ``ProcessorFormatter`` chain rather than on a handler,
+    and that is the whole point of the placement. Redaction used to live only in
+    a filter on the stdout handler, which left the rotating file handlers
+    unscrubbed — and the filter itself only ever ran on ``str`` messages, while a
+    structlog record arrives with the event *dict* in ``record.msg``. So the one
+    kind of line this platform emits almost exclusively — its own structured
+    logs — went through both defences untouched. On 2026-08-12 a provider
+    answering ``401`` wrote a live API key into container logs tens of thousands
+    of times with all of this machinery in place and passing its tests.
+    """
+    return _redact_record(dict(event_dict))
 
 
 def configure_logging(
@@ -156,6 +188,7 @@ def configure_logging(
         foreign_pre_chain=pre_chain,
         processors=[
             structlog.stdlib.ProcessorFormatter.remove_processors_meta,
+            _redact_processor,
             renderer,
         ],
     )
@@ -216,8 +249,11 @@ class _SecretRedactingFilter(logging.Filter):
 
     def filter(self, record: logging.LogRecord) -> bool:
         try:
-            if isinstance(record.msg, str):
-                record.msg = redact_secrets(record.msg)
+            if isinstance(record.msg, str | Mapping):
+                # A structlog record carries its event *dict* here, not a string.
+                # Testing only for `str` is what let every structured log line
+                # past this filter unscrubbed.
+                record.msg = _redact_value(record.msg)
             if record.args:
                 if isinstance(record.args, dict):
                     record.args = {

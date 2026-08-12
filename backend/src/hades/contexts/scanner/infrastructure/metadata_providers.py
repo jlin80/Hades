@@ -126,8 +126,14 @@ class DexScreenerMetadataProvider:
         pairs = payload.get("pairs") if isinstance(payload, dict) else None
         if not pairs:
             return None
-        pair = pairs[0]
-        base = pair.get("baseToken") or {}
+        pair, base = _pair_describing(pairs, str(token.mint))
+        if pair is None or base is None:
+            # Every pair listed the mint on the side we did not read, or listed
+            # neither. There is no metadata here for *this* token, and the
+            # alternative — describing it with a neighbour's name — is worse
+            # than describing it not at all.
+            _logger.debug("dexscreener_metadata_unmatched", mint=str(token.mint))
+            return None
         info = pair.get("info") or {}
         socials = {s.get("type"): s.get("url") for s in info.get("socials") or []}
         websites = info.get("websites") or []
@@ -166,3 +172,30 @@ def _supply(raw: Any, decimals: Any) -> Decimal | None:
         return value
     except (InvalidOperation, ValueError):
         return None
+
+
+def _pair_describing(
+    pairs: Any, mint: str
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Find the pair side that actually *is* ``mint``, and return both.
+
+    DexScreener's ``/tokens/{mint}`` endpoint answers with every pair the mint
+    takes part in, on either side. This provider used to read
+    ``pairs[0]["baseToken"]`` unconditionally, which is only correct when the
+    requested mint happens to be the base of the first pair returned.
+
+    For a quote asset it is never correct: Wrapped SOL is the *quote* of almost
+    every Solana pair, so a metadata lookup for ``So111...112`` returned whatever
+    coin happened to lead the list. That is how the live book came to hold a
+    position on Wrapped SOL labelled ``FOGO`` — the mint was right and the name
+    belonged to a different token entirely, which is the worst combination
+    available: it reads as a successful lookup everywhere downstream.
+    """
+    for pair in pairs:
+        if not isinstance(pair, dict):
+            continue
+        for side in ("baseToken", "quoteToken"):
+            token = pair.get(side) or {}
+            if isinstance(token, dict) and str(token.get("address") or "") == mint:
+                return pair, token
+    return None, None
