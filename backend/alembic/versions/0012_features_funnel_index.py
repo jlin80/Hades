@@ -22,8 +22,22 @@ Written as raw SQL rather than built from ``Base.metadata`` like the migrations
 before it, for one reason: ``CONCURRENTLY``. ``features`` takes continuous
 inserts from the Scanner, and an ordinary ``CREATE INDEX`` holds a lock that
 blocks them for the whole build. An index added to make the platform stop
-starving itself should not stall the write path on its way in. ``CONCURRENTLY``
-cannot run inside a transaction, hence the AUTOCOMMIT execution option.
+starving itself should not stall the write path on its way in.
+
+``CONCURRENTLY`` cannot run inside a transaction, and the way *not* to arrange
+that is ``op.get_bind().execution_options(isolation_level="AUTOCOMMIT")`` — this
+migration shipped that on its first attempt and failed the deploy, because
+Alembic has already begun a transaction on the connection by the time
+``upgrade()`` runs and SQLAlchemy refuses to change the isolation level of a
+connection with one open. ``autocommit_block()`` is Alembic's own answer: it
+commits the migration transaction, runs the body outside one, and opens a fresh
+transaction afterwards for the version-table bookkeeping.
+
+The invalid-index sweep before the create is not defensive padding. A
+``CONCURRENTLY`` build that fails part-way leaves the index behind marked
+``indisvalid = false``, and it is a real index as far as ``IF NOT EXISTS`` is
+concerned — so without this, one failed build would make every later run skip
+the create and report success while the query stayed unindexed.
 
 Revision ID: 0012_features_funnel_index
 Revises: 0011_exploration_ledger
@@ -32,6 +46,7 @@ Create Date: 2026-08-12
 
 from __future__ import annotations
 
+import sqlalchemy as sa
 from alembic import op
 
 revision = "0012_features_funnel_index"
@@ -42,13 +57,22 @@ depends_on = None
 _INDEX = "ix_features_token_id_computed_at"
 
 
+_IS_INVALID = sa.text(
+    "select not i.indisvalid from pg_class c "
+    "join pg_index i on i.indexrelid = c.oid where c.relname = :name"
+)
+
+
 def upgrade() -> None:
-    bind = op.get_bind().execution_options(isolation_level="AUTOCOMMIT")
-    bind.exec_driver_sql(
-        f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {_INDEX} ON features (token_id, computed_at)"
-    )
+    with op.get_context().autocommit_block():
+        bind = op.get_bind()
+        if bind.scalar(_IS_INVALID, {"name": _INDEX}):
+            bind.exec_driver_sql(f"DROP INDEX CONCURRENTLY IF EXISTS {_INDEX}")
+        bind.exec_driver_sql(
+            f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {_INDEX} ON features (token_id, computed_at)"
+        )
 
 
 def downgrade() -> None:
-    bind = op.get_bind().execution_options(isolation_level="AUTOCOMMIT")
-    bind.exec_driver_sql(f"DROP INDEX CONCURRENTLY IF EXISTS {_INDEX}")
+    with op.get_context().autocommit_block():
+        op.get_bind().exec_driver_sql(f"DROP INDEX CONCURRENTLY IF EXISTS {_INDEX}")
